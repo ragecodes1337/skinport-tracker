@@ -373,70 +373,63 @@ function calculateProfitability(currentItem, salesHistory) {
 // Scan for profitable deals
 app.post('/api/scan-deals', async (req, res) => {
     try {
-        // minProfit and minProfitMargin are now the primary filters
         const { minProfit = 0.50, minProfitMargin = 5, limit = 50, currency, skinportMarketUrl } = req.body;
 
-        // Ensure currency is EUR as per user request
         if (currency !== 'EUR') {
             console.warn(`[API] Received scan request for currency ${currency}, but backend only supports EUR for analysis.`);
-            // For now, we'll proceed assuming EUR data is desired and analyzed.
         }
 
         console.log(`[API] Scanning for deals with minProfit: €${minProfit}, minMargin: ${minProfitMargin}% (Currency: EUR)`);
 
-        // Fetch items from Skinport's /v1/items API based on the provided market URL filters.
-        // This will fetch a subset of items, not the entire database, to manage memory.
+        // --- NEW LOGIC: Query MongoDB for items based on URL filters ---
         const urlObj = new URL(skinportMarketUrl);
         const params = new URLSearchParams(urlObj.search);
-        params.set('app_id', '730'); // Ensure CS2 app ID is always used
-        // Add currency to params for the Skinport API call
-        params.set('currency', currency);
-
-        const itemsFromSkinportAPI = await fetchSkinportApi('/items', Object.fromEntries(params.entries()));
-
-        if (!itemsFromSkinportAPI || !Array.isArray(itemsFromSkinportAPI)) {
-            throw new Error('Invalid items response from Skinport API');
+        
+        const queryFilters = {};
+        if (params.has('cat')) {
+            queryFilters['category'] = params.get('cat');
         }
+        if (params.has('type')) {
+            queryFilters['type'] = params.get('type');
+        }
+        if (params.has('exterior')) {
+            queryFilters['wear'] = params.get('exterior'); // Assuming 'exterior' maps to 'wear' in your DB
+        }
+        // Add other filters as needed (e.g., 'item_name', 'rarity', etc.)
+
+        // Always filter by app_id 730 (CS2) if not already present in URL
+        queryFilters['app_id'] = 730;
+
+        // Fetch items from YOUR MongoDB 'items' collection
+        const itemsFromDb = await db.collection('items')
+            .find(queryFilters)
+            .limit(limit * 2) // Fetch more than limit to ensure enough for analysis after filtering
+            .toArray();
+
+        if (!itemsFromDb || itemsFromDb.length === 0) {
+            console.log('[API] No items found in database matching filters.');
+            return res.json({ analyzedItems: [], totalFound: 0, timestamp: new Date().toISOString(), hasMorePages: false });
+        }
+
+        console.log(`[API] Found ${itemsFromDb.length} items in database matching filters.`);
 
         const now = Math.floor(Date.now() / 1000);
         const analyzedItems = [];
 
-        // Process items fetched from Skinport API
-        for (const item of itemsFromSkinportAPI) {
-            // Update the 'items' collection with current data for this item
-            await db.collection('items').updateOne(
-                { market_hash_name: item.market_hash_name },
-                {
-                    $set: {
-                        current_min_price: item.min_price,
-                        current_max_price: item.max_price,
-                        current_mean_price: item.mean_price,
-                        current_median_price: item.median_price,
-                        current_quantity: item.quantity,
-                        suggested_price: item.suggested_price,
-                        last_updated_items: now,
-                        updated_at: item.updated_at
-                    },
-                    $setOnInsert: {
-                        created_at: item.created_at
-                    }
-                },
-                { upsert: true }
-            );
-
-            // Add item to data_collection_queue if it needs sales history
+        for (const item of itemsFromDb) {
+            // Add item to data_collection_queue if its sales history is old or missing
             const existingHistory = await db.collection('sales_history').findOne(
                 { market_hash_name: item.market_hash_name },
                 { projection: { last_updated_history: 1 } }
             );
 
-            if (!existingHistory || (now - existingHistory.last_updated_history > 3600)) {
+            if (!existingHistory || (now - existingHistory.last_updated_history > 3600)) { // Update history if older than 1 hour
                 await db.collection('data_collection_queue').updateOne(
                     { market_hash_name: item.market_hash_name },
                     {
                         $set: {
                             market_hash_name: item.market_hash_name,
-                            priority: existingHistory ? 1 : 3,
+                            priority: existingHistory ? 1 : 3, // Lower priority if already exists
                             last_attempted: 0,
                             retry_count: 0,
                             created_at: now
@@ -446,48 +439,39 @@ app.post('/api/scan-deals', async (req, res) => {
                 );
             }
 
-            // Perform analysis using data from DB if available, otherwise use fetched
-            let itemForAnalysis = item;
-            let salesHistoryData = existingHistory; // Use existing history if recent enough
+            // Get sales history for analysis (from DB, potentially just updated by background worker)
+            const salesHistoryData = await db.collection('sales_history').findOne({ market_hash_name: item.market_hash_name });
 
-            // This is the problematic line in the previous context, now fixed by ensuring fetchItemSalesHistory is globally defined.
-            // However, for the gradual collection strategy, we don't fetch sales history here immediately.
-            // The sales history is fetched by the background runDataCollection.
-            // For immediate analysis, we need to query the DB for sales history.
-            salesHistoryData = await db.collection('sales_history').findOne({ market_hash_name: item.market_hash_name });
+            // Perform analysis
+            const analysis = calculateProfitability(item, salesHistoryData);
 
-
-            const analysis = calculateProfitability(itemForAnalysis, salesHistoryData);
-
-            // Only include items meeting profit criteria AND recommendedAction 'BUY'
             if (analysis.potentialProfit >= minProfit &&
                 analysis.profitMargin >= minProfitMargin &&
                 analysis.recommendedAction === 'BUY') {
 
                 analyzedItems.push({
                     marketHashName: item.market_hash_name,
-                    currentPrice: item.min_price, // Use min_price from the API response
+                    currentPrice: item.current_min_price, // Use current_min_price from DB
                     suggestedPrice: item.suggested_price,
-                    quantity: item.quantity,
-                    analysis: analysis, // Full analysis object
+                    quantity: item.current_quantity,
+                    analysis: analysis,
                     itemUrl: `https://skinport.com/market?item=${encodeURIComponent(item.market_hash_name)}`,
-                    itemId: item.id, // Include itemId for content script
+                    itemId: item.id,
                     wear: item.wear,
-                    isTradable: item.tradable,
-                    potentialProfit: analysis.potentialProfit, // Ensure these are passed
-                    profitPercentage: analysis.profitMargin // Ensure these are passed
+                    isTradable: item.isTradable,
+                    potentialProfit: analysis.potentialProfit,
+                    profitPercentage: analysis.profitMargin
                 });
             }
         }
 
-        // Sort by profit potential (descending)
-        analyzedItems.sort((a, b) => b.analysis.potentialProfit - a.analysis.potentialProfit);
+        analyzedItems.sort((a, b) => b.potentialProfit - a.potentialProfit);
 
         res.json({
-            analyzedItems: analyzedItems.slice(0, limit), // Return only up to the requested limit
-            totalFound: analyzedItems.length, // Total items found before final limit
+            analyzedItems: analyzedItems.slice(0, limit),
+            totalFound: analyzedItems.length,
             timestamp: new Date().toISOString(),
-            hasMorePages: false // Always false for /v1/items endpoint
+            hasMorePages: false // Always false as we're serving from DB, not paginating Skinport API
         });
 
     } catch (error) {
