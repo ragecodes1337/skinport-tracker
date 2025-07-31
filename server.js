@@ -1,8 +1,8 @@
 // API Server for Skinport Tracker (to be deployed on your Render server)
 import express from 'express';
 import cors from 'cors';
-import fetch from 'node-fetch'; // Still using node-fetch
-import NodeCache from 'node-cache'; // Still using node-cache
+import fetch from 'node-fetch';
+import NodeCache from 'node-cache';
 
 const app = express();
 const port = process.env.PORT || 3000; // Use environment port for Render deployment
@@ -278,11 +278,24 @@ app.post('/api/scan-deals', async (req, res) => {
     console.log(`[Server] Processing market scan for URL: ${skinportMarketUrl}`);
     const urlObj = new URL(skinportMarketUrl);
     const params = new URLSearchParams(urlObj.search);
-    params.set('app_id', '730'); // Ensure CS2 app ID is always used
+
+    // Filter parameters to send ONLY app_id, currency, tradable to Skinport API
+    const allowedApiParams = {};
+    if (params.has('app_id')) {
+        allowedApiParams.app_id = params.get('app_id');
+    } else {
+        allowedApiParams.app_id = '730'; // Default to CS2 App ID if not specified in URL
+    }
+    if (params.has('currency')) {
+        allowedApiParams.currency = params.get('currency');
+    }
+    if (params.has('tradable')) {
+        allowedApiParams.tradable = params.get('tradable');
+    }
 
     try {
-        // Fetch ALL items matching the filters from Skinport's /v1/items endpoint.
-        const allSkinportItems = await fetchSkinportApi('/items', Object.fromEntries(params.entries()));
+        // Fetch ALL items matching the filtered parameters from Skinport's /v1/items endpoint.
+        const allSkinportItems = await fetchSkinportApi('/items', allowedApiParams); // Use filtered params
 
         if (allSkinportItems && allSkinportItems.length > 0) {
             console.log(`[Server] Fetched ${allSkinportItems.length} items from Skinport /v1/items.`);
@@ -306,7 +319,7 @@ app.post('/api/scan-deals', async (req, res) => {
     for (const item of itemsToAnalyze) {
         try {
             // Fetch sales history for each item
-            const salesHistory = await fetchItemSalesHistory(item.marketHashName, currency);
+            const salesHistory = await fetchItemSalesHistory(item.marketHashName, currency); // Use currency from request body
             // Calculate achievable price based on sales history and the item's current listed price
             const analysisResult = calculateAchievablePrice(salesHistory, item.currentPrice);
 
