@@ -22,13 +22,15 @@ app.use(express.json()); // Enable parsing of JSON request bodies
 const SKINPORT_API_BASE = 'https://api.skinport.com/v1';
 
 // --- Custom Server-side Rate Limiter for Skinport API Calls ---
-// This replaces p-queue. It ensures requests are sent sequentially with a delay.
+// This ensures requests are sent sequentially with a delay.
 const requestQueue = []; // Stores functions to execute
 let isProcessingQueue = false; // Flag to prevent multiple concurrent processing loops
 
 // Configuration for the custom rate limiter
-// Increased delay to avoid Skinport API rate limits. 3 seconds should be safer.
-const REQUEST_DELAY_MS = 3000; // <<< Increased to 3 seconds (3000 ms)
+// Increased delay to avoid Skinport API rate limits. 5 seconds should be very safe.
+const REQUEST_DELAY_MS = 5000; // <<< Increased to 5 seconds (5000 ms)
+const MAX_RETRIES = 3; // Max retries for rate limit errors
+const RETRY_DELAY_MS = 10000; // 10 seconds delay before retrying a rate-limited request
 
 // Function to process the queue
 async function processQueue() {
@@ -38,13 +40,20 @@ async function processQueue() {
 
     isProcessingQueue = true;
     while (requestQueue.length > 0) {
-        const { task, resolve, reject } = requestQueue.shift(); // Get the next task
+        const { task, resolve, reject, retries = 0 } = requestQueue.shift(); // Get the next task, including retry count
 
         try {
             const result = await task(); // Execute the task (fetchSkinportApi call)
             resolve(result); // Resolve the promise for the original caller
         } catch (error) {
-            reject(error); // Reject the promise for the original caller
+            if (error.message.includes('Rate limit hit') && retries < MAX_RETRIES) {
+                console.warn(`[Server] Rate limit hit for task. Retrying in ${RETRY_DELAY_MS / 1000} seconds (Retry ${retries + 1}/${MAX_RETRIES}).`);
+                // Re-queue the task with an incremented retry count
+                requestQueue.unshift({ task, resolve, reject, retries: retries + 1 });
+                await new Promise(res => setTimeout(res, RETRY_DELAY_MS)); // Wait longer before retry
+            } else {
+                reject(error); // Reject if not a rate limit error or max retries reached
+            }
         }
 
         // Wait for the defined delay before processing the next request
@@ -76,10 +85,7 @@ async function fetchSkinportApi(endpoint, params = {}, headers = {}) {
                 });
 
                 if (response.status === 429) {
-                    console.warn(`[Server] Skinport API rate limit hit for ${endpoint}. Retrying...`);
-                    // Instead of throwing, we might re-queue or implement exponential backoff here.
-                    // For simplicity, we'll let the outer catch handle it for now, which will reject the promise.
-                    throw new Error('Rate limit hit, consider increasing REQUEST_DELAY_MS or implementing retry logic.');
+                    throw new Error('Rate limit hit'); // Throw a specific error for rate limits
                 }
                 if (!response.ok) {
                     const errorText = await response.text();
@@ -299,13 +305,16 @@ app.post('/api/scan-deals', async (req, res) => {
 
         if (allSkinportItems && allSkinportItems.length > 0) {
             console.log(`[Server] Fetched ${allSkinportItems.length} items from Skinport /v1/items.`);
-            itemsToAnalyze = allSkinportItems.map(item => ({
+            // Limit the number of items to analyze to prevent excessive API calls
+            // For example, process only the first 20 items from the market list.
+            itemsToAnalyze = allSkinportItems.slice(0, 20).map(item => ({ // <<< Added slice to limit items
                 marketHashName: item.market_hash_name,
                 currentPrice: item.min_price, // Use min_price as the current listed price
                 itemId: item.id,
                 wear: item.wear,
                 isTradable: item.tradable
             }));
+            console.log(`[Server] Analyzing first ${itemsToAnalyze.length} items from market scan.`);
         } else {
             console.log('[Server] No items found for market scan filters.');
             return res.json({ analyzedItems: [], hasMorePages: false });
