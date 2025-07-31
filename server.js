@@ -159,93 +159,12 @@ async function fetchSkinportApi(endpoint, params = {}) {
 // DATA COLLECTION SYSTEM (MongoDB)
 // =============================================================================
 
-// Fetch and store all items data - MODIFIED FOR MEMORY OPTIMIZATION
-async function updateAllItemsData() {
-    try {
-        console.log('[Data Collection] Fetching all items...');
-        // Always fetch in EUR as per user request
-        const allItemsFromApi = await fetchSkinportApi('/items', { app_id: 730, currency: 'EUR' });
+// Removed updateAllItemsData from automated cycle to prevent memory issues.
+// Items will now be added to the 'items' collection and 'data_collection_queue'
+// when they are encountered via the /api/scan-deals endpoint or when their
+// sales history is updated.
 
-        if (!allItemsFromApi || !Array.isArray(allItemsFromApi)) {
-            throw new Error('Invalid items response');
-        }
-        const now = Math.floor(Date.now() / 1000);
-
-        const BATCH_SIZE = 500; // Process 500 items at a time to manage memory
-        let processedCount = 0;
-
-        // Iterate through items in batches
-        for (let i = 0; i < allItemsFromApi.length; i += BATCH_SIZE) {
-            const batch = allItemsFromApi.slice(i, i + BATCH_SIZE);
-            console.log(`[Data Collection] Processing batch ${Math.floor(i / BATCH_SIZE) + 1} of items (${batch.length} items)...`);
-
-            const bulkOps = batch.map(item => ({
-                updateOne: {
-                    filter: { market_hash_name: item.market_hash_name },
-                    update: {
-                        $set: {
-                            current_min_price: item.min_price,
-                            current_max_price: item.max_price,
-                            current_mean_price: item.mean_price,
-                            current_median_price: item.median_price,
-                            current_quantity: item.quantity,
-                            suggested_price: item.suggested_price,
-                            last_updated_items: now,
-                            updated_at: item.updated_at
-                        },
-                        $setOnInsert: {
-                            created_at: item.created_at
-                        }
-                    },
-                    upsert: true
-                }
-            }));
-
-            if (bulkOps.length > 0) {
-                await db.collection('items').bulkWrite(bulkOps, { ordered: false }); // Unordered for better performance
-            }
-            processedCount += batch.length;
-
-            // Add new/updated items from this batch to collection queue
-            const newItemPromises = batch
-                .filter(item => item.quantity > 0)
-                .map(async item => {
-                    const existingHistory = await db.collection('sales_history').findOne(
-                        { market_hash_name: item.market_hash_name },
-                        { projection: { last_updated_history: 1 } }
-                    );
-
-                    if (!existingHistory || (now - existingHistory.last_updated_history > 3600)) {
-                        await db.collection('data_collection_queue').updateOne(
-                            { market_hash_name: item.market_hash_name },
-                            {
-                                $set: {
-                                    market_hash_name: item.market_hash_name,
-                                    priority: existingHistory ? 1 : 3,
-                                    last_attempted: 0,
-                                    retry_count: 0,
-                                    created_at: now
-                                }
-                            },
-                            { upsert: true }
-                        );
-                    }
-                });
-            await Promise.all(newItemPromises);
-
-            // Add a small delay between batches to further manage memory and I/O
-            await new Promise(resolve => setTimeout(resolve, 100)); // 100ms delay
-        }
-
-        console.log(`[Data Collection] Updated ${processedCount} items in MongoDB`);
-        return processedCount;
-    } catch (error) {
-        console.error('[Data Collection] Error updating items:', error);
-        throw error;
-    }
-}
-
-// Fetch sales history for a specific item
+// Fetch sales history for a specific item - MODIFIED TO ALSO UPDATE ITEM DATA
 async function updateItemSalesHistory(marketHashName) {
     try {
         console.log(`[Data Collection] Fetching sales history for: ${marketHashName}`);
@@ -262,6 +181,30 @@ async function updateItemSalesHistory(marketHashName) {
         }
         const data = salesData[0]; // Skinport returns an array, take the first item's data
         const now = Math.floor(Date.now() / 1000);
+
+        // --- Update/Insert item data in 'items' collection ---
+        // This ensures basic item data is present even if not from a full /items fetch
+        await db.collection('items').updateOne(
+            { market_hash_name: marketHashName },
+            {
+                $set: {
+                    current_min_price: data.min_price || 0, // Use sales history min_price if available
+                    current_max_price: data.max_price || 0,
+                    current_mean_price: data.mean_price || 0,
+                    current_median_price: data.median_price || 0,
+                    current_quantity: data.quantity || 0,
+                    suggested_price: data.suggested_price || 0,
+                    last_updated_items: now,
+                    updated_at: data.updated_at || now // Use Skinport's updated_at or current time
+                },
+                $setOnInsert: {
+                    created_at: data.created_at || now // Use Skinport's created_at or current time
+                }
+            },
+            { upsert: true }
+        );
+        console.log(`[Data Collection] Updated item data for: ${marketHashName}`);
+
 
         // Update or insert sales history document in MongoDB
         await db.collection('sales_history').updateOne(
@@ -304,8 +247,9 @@ async function updateItemSalesHistory(marketHashName) {
 // Background data collection worker
 async function runDataCollection() {
     try {
-        // Step 1: Update all items (uses 1 API request to Skinport, then batched DB writes)
-        await updateAllItemsData();
+        // Removed the updateAllItemsData() call to prevent memory issues.
+        // The 'items' collection will now be populated as items are encountered
+        // through the /api/scan-deals endpoint or when their sales history is updated.
 
         // Step 2: Process a batch of items from the queue for sales history (uses more API requests)
         const queueItems = await db.collection('data_collection_queue')
@@ -430,7 +374,7 @@ function calculateProfitability(currentItem, salesHistory) {
 app.post('/api/scan-deals', async (req, res) => {
     try {
         // minProfit and minProfitMargin are now the primary filters
-        const { minProfit = 0.50, minProfitMargin = 5, limit = 50, currency } = req.body;
+        const { minProfit = 0.50, minProfitMargin = 5, limit = 50, currency, skinportMarketUrl } = req.body;
 
         // Ensure currency is EUR as per user request
         if (currency !== 'EUR') {
@@ -440,39 +384,80 @@ app.post('/api/scan-deals', async (req, res) => {
 
         console.log(`[API] Scanning for deals with minProfit: €${minProfit}, minMargin: ${minProfitMargin}% (Currency: EUR)`);
 
-        // Get items with both current data and sales history from MongoDB
-        // We're querying the database, not Skinport API directly here.
-        const items = await db.collection('items').aggregate([
-            {
-                $lookup: { // Join 'items' with 'sales_history'
-                    from: 'sales_history',
-                    localField: 'market_hash_name',
-                    foreignField: 'market_hash_name',
-                    as: 'salesHistoryData'
-                }
-            },
-            {
-                $unwind: { // Deconstructs the salesHistoryData array field from the input documents to output a document for each element.
-                    path: '$salesHistoryData',
-                    preserveNullAndEmptyArrays: true // Keep items even if no sales history found
-                }
-            },
-            {
-                $match: { // Filter items based on criteria
-                    current_quantity: { $gt: 0 }, // Only items with quantity > 0
-                    current_min_price: { $gt: 0 } // Only items with a valid price
-                }
-            },
-            {
-                $limit: limit * 3 // Fetch more items than the requested limit for internal filtering
-            }
-        ]).toArray();
+        // Fetch items from Skinport's /v1/items API based on the provided market URL filters.
+        // This will fetch a subset of items, not the entire database, to manage memory.
+        const urlObj = new URL(skinportMarketUrl);
+        const params = new URLSearchParams(urlObj.search);
+        params.set('app_id', '730'); // Ensure CS2 app ID is always used
+        // Add currency to params for the Skinport API call
+        params.set('currency', currency);
 
+        const itemsFromSkinportAPI = await fetchSkinportApi('/items', Object.fromEntries(params.entries()));
+
+        if (!itemsFromSkinportAPI || !Array.isArray(itemsFromSkinportAPI)) {
+            throw new Error('Invalid items response from Skinport API');
+        }
+
+        const now = Math.floor(Date.now() / 1000);
         const analyzedItems = [];
 
-        for (const item of items) {
-            // Pass the sales history data from the lookup
-            const analysis = calculateProfitability(item, item.salesHistoryData);
+        // Process items fetched from Skinport API
+        for (const item of itemsFromSkinportAPI) {
+            // Update the 'items' collection with current data for this item
+            await db.collection('items').updateOne(
+                { market_hash_name: item.market_hash_name },
+                {
+                    $set: {
+                        current_min_price: item.min_price,
+                        current_max_price: item.max_price,
+                        current_mean_price: item.mean_price,
+                        current_median_price: item.median_price,
+                        current_quantity: item.quantity,
+                        suggested_price: item.suggested_price,
+                        last_updated_items: now,
+                        updated_at: item.updated_at
+                    },
+                    $setOnInsert: {
+                        created_at: item.created_at
+                    }
+                },
+                { upsert: true }
+            );
+
+            // Add item to data_collection_queue if it needs sales history
+            const existingHistory = await db.collection('sales_history').findOne(
+                { market_hash_name: item.market_hash_name },
+                { projection: { last_updated_history: 1 } }
+            );
+
+            if (!existingHistory || (now - existingHistory.last_updated_history > 3600)) {
+                await db.collection('data_collection_queue').updateOne(
+                    { market_hash_name: item.market_hash_name },
+                    {
+                        $set: {
+                            market_hash_name: item.market_hash_name,
+                            priority: existingHistory ? 1 : 3,
+                            last_attempted: 0,
+                            retry_count: 0,
+                            created_at: now
+                        }
+                    },
+                    { upsert: true }
+                );
+            }
+
+            // Perform analysis using data from DB if available, otherwise use fetched
+            let itemForAnalysis = item;
+            let salesHistoryData = existingHistory; // Use existing history if recent enough
+
+            if (!salesHistoryData || (now - existingHistory.last_updated_history > 3600)) {
+                 // If no history or old history, try to fetch it immediately for analysis
+                 // NOTE: This will add to the rate limit queue.
+                 salesHistoryData = await fetchItemSalesHistory(item.market_hash_name);
+            }
+
+
+            const analysis = calculateProfitability(itemForAnalysis, salesHistoryData);
 
             // Only include items meeting profit criteria AND recommendedAction 'BUY'
             if (analysis.potentialProfit >= minProfit &&
@@ -481,12 +466,14 @@ app.post('/api/scan-deals', async (req, res) => {
 
                 analyzedItems.push({
                     marketHashName: item.market_hash_name,
-                    currentPrice: item.current_min_price,
+                    currentPrice: item.min_price, // Use min_price from the API response
                     suggestedPrice: item.suggested_price,
-                    quantity: item.current_quantity,
+                    quantity: item.quantity,
                     analysis: analysis, // Full analysis object
-                    // Construct Skinport URL based on market_hash_name
-                    itemUrl: `https://skinport.com/market?item=${encodeURIComponent(item.market_hash_name)}`
+                    itemUrl: `https://skinport.com/market?item=${encodeURIComponent(item.market_hash_name)}`,
+                    itemId: item.id, // Include itemId for content script
+                    wear: item.wear,
+                    isTradable: item.tradable
                 });
             }
         }
@@ -497,7 +484,8 @@ app.post('/api/scan-deals', async (req, res) => {
         res.json({
             analyzedItems: analyzedItems.slice(0, limit), // Return only up to the requested limit
             totalFound: analyzedItems.length, // Total items found before final limit
-            timestamp: new Date().toISOString()
+            timestamp: new Date().toISOString(),
+            hasMorePages: false // Always false for /v1/items endpoint
         });
 
     } catch (error) {
@@ -540,16 +528,16 @@ app.get('/api/stats', async (req, res) => {
 async function startServer() {
     await connectToMongoDB(); // Connect to MongoDB
 
-    // Start the collection cycle immediately
-    console.log('[Server] Starting initial data collection...');
+    // Start the collection cycle immediately for sales history queue processing
+    console.log('[Server] Starting initial data collection (processing queue)...');
     runDataCollection();
 
-    // Schedule data collection every 5 minutes
+    // Schedule data collection (processing queue) every 5 minutes
     setInterval(runDataCollection, 5 * 60 * 1000);
 
     app.listen(port, () => {
         console.log(`[Server] Skinport Tracker running on port ${port}`);
-        console.log(`[Server] Data collection will run every 5 minutes`);
+        console.log(`[Server] Data collection queue will be processed every 5 minutes`);
     });
 }
 
