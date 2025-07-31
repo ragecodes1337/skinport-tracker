@@ -450,11 +450,11 @@ app.post('/api/scan-deals', async (req, res) => {
             let itemForAnalysis = item;
             let salesHistoryData = existingHistory; // Use existing history if recent enough
 
-            if (!salesHistoryData || (now - existingHistory.last_updated_history > 3600)) {
-                 // If no history or old history, try to fetch it immediately for analysis
-                 // NOTE: This will add to the rate limit queue.
-                 salesHistoryData = await fetchItemSalesHistory(item.market_hash_name);
-            }
+            // This is the problematic line in the previous context, now fixed by ensuring fetchItemSalesHistory is globally defined.
+            // However, for the gradual collection strategy, we don't fetch sales history here immediately.
+            // The sales history is fetched by the background runDataCollection.
+            // For immediate analysis, we need to query the DB for sales history.
+            salesHistoryData = await db.collection('sales_history').findOne({ market_hash_name: item.market_hash_name });
 
 
             const analysis = calculateProfitability(itemForAnalysis, salesHistoryData);
@@ -473,7 +473,9 @@ app.post('/api/scan-deals', async (req, res) => {
                     itemUrl: `https://skinport.com/market?item=${encodeURIComponent(item.market_hash_name)}`,
                     itemId: item.id, // Include itemId for content script
                     wear: item.wear,
-                    isTradable: item.tradable
+                    isTradable: item.tradable,
+                    potentialProfit: analysis.potentialProfit, // Ensure these are passed
+                    profitPercentage: analysis.profitMargin // Ensure these are passed
                 });
             }
         }
