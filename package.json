@@ -1,7 +1,7 @@
 {
   "name": "skinport-tracker-backend",
   "version": "1.0.0",
-  "description": "Backend for Skinport Tracker Chrome Extension",
+  "description": "Backend for Skinport Tracker Chrome Extension with MongoDB",
   "main": "server.js",
   "type": "module",
   "scripts": {
@@ -10,7 +10,8 @@
   "dependencies": {
     "express": "^4.19.2",
     "cors": "^2.8.5",
-    "node-fetch": "2.6.7",
-    "node-cache": "^5.1.2"
+    "node-fetch": "2.6.7",   
+    "node-cache": "^5.1.2",
+    "mongodb": "^6.8.0"  
   }
 }
