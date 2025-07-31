@@ -1,8 +1,8 @@
 const express = require('express');
 const cors = require('cors');
-const fetch = require('node-fetch'); // Use node-fetch for server-side fetches
+const fetch = require('node-fetch').default; // Use node-fetch for server-side fetches
 const NodeCache = require('node-cache'); // For caching API responses
-const PQueue = require('p-queue'); // PQueue for server-side rate limiting to Skinport
+const PQueue = require('p-queue').default; // PQueue for server-side rate limiting to Skinport
 
 const app = express();
 const port = process.env.PORT || 3000; // Use environment port for Render deployment
