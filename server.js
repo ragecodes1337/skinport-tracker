@@ -159,75 +159,86 @@ async function fetchSkinportApi(endpoint, params = {}) {
 // DATA COLLECTION SYSTEM (MongoDB)
 // =============================================================================
 
-// Fetch and store all items data
+// Fetch and store all items data - MODIFIED FOR MEMORY OPTIMIZATION
 async function updateAllItemsData() {
     try {
         console.log('[Data Collection] Fetching all items...');
         // Always fetch in EUR as per user request
-        const items = await fetchSkinportApi('/items', { app_id: 730, currency: 'EUR' });
+        const allItemsFromApi = await fetchSkinportApi('/items', { app_id: 730, currency: 'EUR' });
 
-        if (!items || !Array.isArray(items)) {
+        if (!allItemsFromApi || !Array.isArray(allItemsFromApi)) {
             throw new Error('Invalid items response');
         }
         const now = Math.floor(Date.now() / 1000);
 
-        // Prepare bulk write operations for MongoDB
-        const bulkOps = items.map(item => ({
-            updateOne: {
-                filter: { market_hash_name: item.market_hash_name }, // Find by market_hash_name
-                update: {
-                    $set: { // Set/update these fields
-                        current_min_price: item.min_price,
-                        current_max_price: item.max_price,
-                        current_mean_price: item.mean_price,
-                        current_median_price: item.median_price,
-                        current_quantity: item.quantity,
-                        suggested_price: item.suggested_price,
-                        last_updated_items: now, // Our internal timestamp
-                        updated_at: item.updated_at // Skinport's timestamp
-                    },
-                    $setOnInsert: { // Only set these fields on initial insert
-                        created_at: item.created_at // Skinport's timestamp
-                    }
-                },
-                upsert: true // Insert a new document if no match is found
-            }
-        }));
+        const BATCH_SIZE = 500; // Process 500 items at a time to manage memory
+        let processedCount = 0;
 
-        if (bulkOps.length > 0) {
-            await db.collection('items').bulkWrite(bulkOps); // Execute bulk write
+        // Iterate through items in batches
+        for (let i = 0; i < allItemsFromApi.length; i += BATCH_SIZE) {
+            const batch = allItemsFromApi.slice(i, i + BATCH_SIZE);
+            console.log(`[Data Collection] Processing batch ${Math.floor(i / BATCH_SIZE) + 1} of items (${batch.length} items)...`);
+
+            const bulkOps = batch.map(item => ({
+                updateOne: {
+                    filter: { market_hash_name: item.market_hash_name },
+                    update: {
+                        $set: {
+                            current_min_price: item.min_price,
+                            current_max_price: item.max_price,
+                            current_mean_price: item.mean_price,
+                            current_median_price: item.median_price,
+                            current_quantity: item.quantity,
+                            suggested_price: item.suggested_price,
+                            last_updated_items: now,
+                            updated_at: item.updated_at
+                        },
+                        $setOnInsert: {
+                            created_at: item.created_at
+                        }
+                    },
+                    upsert: true
+                }
+            }));
+
+            if (bulkOps.length > 0) {
+                await db.collection('items').bulkWrite(bulkOps, { ordered: false }); // Unordered for better performance
+            }
+            processedCount += batch.length;
+
+            // Add new/updated items from this batch to collection queue
+            const newItemPromises = batch
+                .filter(item => item.quantity > 0)
+                .map(async item => {
+                    const existingHistory = await db.collection('sales_history').findOne(
+                        { market_hash_name: item.market_hash_name },
+                        { projection: { last_updated_history: 1 } }
+                    );
+
+                    if (!existingHistory || (now - existingHistory.last_updated_history > 3600)) {
+                        await db.collection('data_collection_queue').updateOne(
+                            { market_hash_name: item.market_hash_name },
+                            {
+                                $set: {
+                                    market_hash_name: item.market_hash_name,
+                                    priority: existingHistory ? 1 : 3,
+                                    last_attempted: 0,
+                                    retry_count: 0,
+                                    created_at: now
+                                }
+                            },
+                            { upsert: true }
+                        );
+                    }
+                });
+            await Promise.all(newItemPromises);
+
+            // Add a small delay between batches to further manage memory and I/O
+            await new Promise(resolve => setTimeout(resolve, 100)); // 100ms delay
         }
 
-        // Add new/updated items to collection queue if they don't have sales history or need update
-        const newItemPromises = items
-            .filter(item => item.quantity > 0) // Only queue items that are actually available
-            .map(async item => {
-                const existingHistory = await db.collection('sales_history').findOne(
-                    { market_hash_name: item.market_hash_name },
-                    { projection: { last_updated_history: 1 } } // Only fetch last_updated_history
-                );
-
-                // If no history or history is older than 1 hour (3600 seconds), add/update in queue
-                if (!existingHistory || (now - existingHistory.last_updated_history > 3600)) {
-                    await db.collection('data_collection_queue').updateOne(
-                        { market_hash_name: item.market_hash_name },
-                        {
-                            $set: {
-                                market_hash_name: item.market_hash_name,
-                                priority: existingHistory ? 1 : 3, // High priority for new items (3), lower for updates (1)
-                                last_attempted: 0, // Reset attempt time
-                                retry_count: 0, // Reset retry count
-                                created_at: now // Update creation time in queue (our timestamp)
-                            }
-                        },
-                        { upsert: true } // Insert if not found, update if found
-                    );
-                }
-            });
-        await Promise.all(newItemPromises); // Run all queue updates concurrently
-
-        console.log(`[Data Collection] Updated ${items.length} items in MongoDB`);
-        return items.length;
+        console.log(`[Data Collection] Updated ${processedCount} items in MongoDB`);
+        return processedCount;
     } catch (error) {
         console.error('[Data Collection] Error updating items:', error);
         throw error;
@@ -293,7 +304,7 @@ async function updateItemSalesHistory(marketHashName) {
 // Background data collection worker
 async function runDataCollection() {
     try {
-        // Step 1: Update all items (uses 1 API request to Skinport)
+        // Step 1: Update all items (uses 1 API request to Skinport, then batched DB writes)
         await updateAllItemsData();
 
         // Step 2: Process a batch of items from the queue for sales history (uses more API requests)
