@@ -3,6 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import fetch from 'node-fetch';
 import NodeCache from 'node-cache';
+import { MongoClient } from 'mongodb'; // Import MongoClient for MongoDB operations
 
 const app = express();
 const port = process.env.PORT || 3000; // Use environment port for Render deployment
@@ -10,6 +11,41 @@ const port = process.env.PORT || 3000; // Use environment port for Render deploy
 // Cache for API responses (e.g., Skinport sales history)
 // Cache for 5 minutes (300 seconds) by default, matching Skinport's cache
 const cache = new NodeCache({ stdTTL: 300, checkperiod: 120 });
+
+// MongoDB Connection Variables
+let db; // This will hold our MongoDB database object
+let mongoClient; // This will hold the MongoDB client instance
+
+// Function to connect to MongoDB
+async function connectToMongoDB() {
+    // Retrieve MongoDB URI from environment variables (set on Render dashboard)
+    const mongoUri = process.env.MONGO_URI;
+    if (!mongoUri) {
+        console.error('MONGO_URI environment variable is not set! Cannot connect to database.');
+        process.exit(1); // Exit the process if the URI is missing
+    }
+
+    try {
+        mongoClient = new MongoClient(mongoUri);
+        await mongoClient.connect(); // Connect to the MongoDB cluster
+        // Extract database name from the URI or use a default
+        const dbName = new URL(mongoUri).pathname.substring(1) || 'skinport_tracker_db';
+        db = mongoClient.db(dbName); // Get the database instance
+
+        // Ensure indexes for efficient querying in MongoDB
+        // For 'items' collection
+        await db.collection('items').createIndex({ market_hash_name: 1 }, { unique: true });
+        // For 'sales_history' collection
+        await db.collection('sales_history').createIndex({ market_hash_name: 1 }, { unique: true });
+        // For 'data_collection_queue' collection
+        await db.collection('data_collection_queue').createIndex({ priority: -1, last_attempted: 1 });
+
+        console.log(`[Database] Connected to MongoDB database: ${dbName} and indexes ensured.`);
+    } catch (error) {
+        console.error('[Database] Failed to connect to MongoDB:', error);
+        process.exit(1); // Exit if database connection fails
+    }
+}
 
 // Middleware
 app.use(cors({
@@ -28,27 +64,54 @@ let isProcessingQueue = false; // Flag to prevent multiple concurrent processing
 
 // Configuration for the custom rate limiter
 // Increased delay to avoid Skinport API rate limits. 5 seconds should be very safe.
-const REQUEST_DELAY_MS = 5000; // <<< Increased to 5 seconds (5000 ms)
+const REQUEST_DELAY_MS = 5000; // 5 seconds (5000 ms)
 const MAX_RETRIES = 3; // Max retries for rate limit errors
 const RETRY_DELAY_MS = 10000; // 10 seconds delay before retrying a rate-limited request
 
-// Function to process the queue
-async function processQueue() {
-    if (isProcessingQueue || requestQueue.length === 0) {
-        return; // Already processing or nothing in queue
-    }
+// Request counter for the rate limit window
+let requestCount = 0;
+let windowStartTime = Date.now();
 
+// Reset rate limit window
+function resetRateLimitWindow() {
+    requestCount = 0;
+    windowStartTime = Date.now();
+    console.log('[Rate Limiter] Window reset');
+}
+
+// Process request queue with proper rate limiting
+async function processQueue() {
+    if (isProcessingQueue) return;
     isProcessingQueue = true;
+    console.log('[Queue] Started processing');
+
     while (requestQueue.length > 0) {
-        const { task, resolve, reject, retries = 0 } = requestQueue.shift(); // Get the next task, including retry count
+        const now = Date.now();
+
+        // Reset window if 5 minutes have passed
+        if (now - windowStartTime >= (5 * 60 * 1000)) { // 5 minutes window
+            resetRateLimitWindow();
+        }
+
+        // Wait if we've hit the rate limit for the current window
+        if (requestCount >= 8) { // Skinport's limit is 8 requests per 5 minutes
+            const waitTime = (5 * 60 * 1000) - (now - windowStartTime);
+            console.log(`[Rate Limiter] Waiting ${Math.round(waitTime / 1000)}s for window reset`);
+            await new Promise(resolve => setTimeout(resolve, waitTime));
+            resetRateLimitWindow();
+        }
+
+        const { task, resolve, reject, retries = 0 } = requestQueue.shift();
 
         try {
-            const result = await task(); // Execute the task (fetchSkinportApi call)
-            resolve(result); // Resolve the promise for the original caller
+            const result = await task();
+            requestCount++; // Increment count only after successful execution
+            resolve(result);
+            console.log(`[Rate Limiter] Request completed (${requestCount}/8)`);
         } catch (error) {
             if (error.message.includes('Rate limit hit') && retries < MAX_RETRIES) {
                 console.warn(`[Server] Rate limit hit for task. Retrying in ${RETRY_DELAY_MS / 1000} seconds (Retry ${retries + 1}/${MAX_RETRIES}).`);
-                // Re-queue the task with an incremented retry count
+                // Re-queue the task with an incremented retry count at the front
                 requestQueue.unshift({ task, resolve, reject, retries: retries + 1 });
                 await new Promise(res => setTimeout(res, RETRY_DELAY_MS)); // Wait longer before retry
             } else {
@@ -56,312 +119,428 @@ async function processQueue() {
             }
         }
 
-        // Wait for the defined delay before processing the next request
+        // Wait between requests if more are queued (to avoid burst limits)
         if (requestQueue.length > 0) {
-            await new Promise(res => setTimeout(res, REQUEST_DELAY_MS));
+            await new Promise(resolve => setTimeout(resolve, REQUEST_DELAY_MS)); // Use the main delay
         }
     }
     isProcessingQueue = false;
-    console.log('[Server] Skinport API queue finished processing.');
+    console.log('[Queue] Finished processing');
 }
 
-// --- Helper Function: Make Rate-Limited Fetch Requests to Skinport API from Server ---
-// This function now uses our custom queue
-async function fetchSkinportApi(endpoint, params = {}, headers = {}) {
+// Make rate-limited API requests
+async function fetchSkinportApi(endpoint, params = {}) {
     const queryString = new URLSearchParams(params).toString();
     const url = `${SKINPORT_API_BASE}${endpoint}?${queryString}`;
-
-    console.log(`[Server] Adding Skinport API call to custom queue: ${url}`);
     return new Promise((resolve, reject) => {
         requestQueue.push({
             task: async () => {
-                console.log(`[Server] Executing Skinport API call from queue: ${url}`);
+                console.log(`[API] Fetching: ${url}`);
                 const response = await fetch(url, {
-                    method: 'GET',
-                    headers: {
-                        'Accept-Encoding': 'br', // Request Brotli compression
-                        ...headers
-                    }
+                    headers: { 'Accept-Encoding': 'br' }
                 });
-
                 if (response.status === 429) {
                     throw new Error('Rate limit hit'); // Throw a specific error for rate limits
                 }
                 if (!response.ok) {
                     const errorText = await response.text();
-                    throw new Error(`[Server] Skinport API error (${response.status} ${response.statusText}): ${errorText}`);
+                    throw new Error(`API error: ${response.status} ${response.statusText} - ${errorText}`);
                 }
                 return response.json();
             },
             resolve,
             reject
         });
-        // Start processing the queue if it's not already running
-        processQueue();
+        processQueue(); // Start processing the queue if not already running
     });
 }
 
-// --- Core Logic: Fetch Sales History for a Specific Item (now on server) ---
-// Fetches aggregated sales data (24h, 7d, 30d, 90d volumes and averages) for an item.
-async function fetchItemSalesHistory(marketHashName, currency) {
-    const cacheKey = `sales_history_${marketHashName}_${currency}`;
-    const cachedData = cache.get(cacheKey);
-    if (cachedData) {
-        console.log(`[Server] Returning cached sales history for ${marketHashName}`);
-        return cachedData;
-    }
+// =============================================================================
+// DATA COLLECTION SYSTEM (MongoDB)
+// =============================================================================
 
+// Fetch and store all items data
+async function updateAllItemsData() {
     try {
+        console.log('[Data Collection] Fetching all items...');
+        // Always fetch in EUR as per user request
+        const items = await fetchSkinportApi('/items', { app_id: 730, currency: 'EUR' });
+
+        if (!items || !Array.isArray(items)) {
+            throw new Error('Invalid items response');
+        }
+        const now = Math.floor(Date.now() / 1000);
+
+        // Prepare bulk write operations for MongoDB
+        const bulkOps = items.map(item => ({
+            updateOne: {
+                filter: { market_hash_name: item.market_hash_name }, // Find by market_hash_name
+                update: {
+                    $set: { // Set/update these fields
+                        current_min_price: item.min_price,
+                        current_max_price: item.max_price,
+                        current_mean_price: item.mean_price,
+                        current_median_price: item.median_price,
+                        current_quantity: item.quantity,
+                        suggested_price: item.suggested_price,
+                        last_updated_items: now, // Our internal timestamp
+                        updated_at: item.updated_at // Skinport's timestamp
+                    },
+                    $setOnInsert: { // Only set these fields on initial insert
+                        created_at: item.created_at // Skinport's timestamp
+                    }
+                },
+                upsert: true // Insert a new document if no match is found
+            }
+        }));
+
+        if (bulkOps.length > 0) {
+            await db.collection('items').bulkWrite(bulkOps); // Execute bulk write
+        }
+
+        // Add new/updated items to collection queue if they don't have sales history or need update
+        const newItemPromises = items
+            .filter(item => item.quantity > 0) // Only queue items that are actually available
+            .map(async item => {
+                const existingHistory = await db.collection('sales_history').findOne(
+                    { market_hash_name: item.market_hash_name },
+                    { projection: { last_updated_history: 1 } } // Only fetch last_updated_history
+                );
+
+                // If no history or history is older than 1 hour (3600 seconds), add/update in queue
+                if (!existingHistory || (now - existingHistory.last_updated_history > 3600)) {
+                    await db.collection('data_collection_queue').updateOne(
+                        { market_hash_name: item.market_hash_name },
+                        {
+                            $set: {
+                                market_hash_name: item.market_hash_name,
+                                priority: existingHistory ? 1 : 3, // High priority for new items (3), lower for updates (1)
+                                last_attempted: 0, // Reset attempt time
+                                retry_count: 0, // Reset retry count
+                                created_at: now // Update creation time in queue (our timestamp)
+                            }
+                        },
+                        { upsert: true } // Insert if not found, update if found
+                    );
+                }
+            });
+        await Promise.all(newItemPromises); // Run all queue updates concurrently
+
+        console.log(`[Data Collection] Updated ${items.length} items in MongoDB`);
+        return items.length;
+    } catch (error) {
+        console.error('[Data Collection] Error updating items:', error);
+        throw error;
+    }
+}
+
+// Fetch sales history for a specific item
+async function updateItemSalesHistory(marketHashName) {
+    try {
+        console.log(`[Data Collection] Fetching sales history for: ${marketHashName}`);
+        // Always fetch in EUR as per user request
         const salesData = await fetchSkinportApi('/sales/history', {
-            app_id: 730, // CS2 App ID
-            currency: currency,
+            app_id: 730,
+            currency: 'EUR',
             market_hash_name: marketHashName
         });
 
-        if (salesData && salesData.length > 0) {
-            const data = salesData[0]; // Skinport returns an array, take the first item's data
-            cache.set(cacheKey, data); // Cache the result
-            console.log(`[Server] Successfully fetched and cached sales history for ${marketHashName}`);
-            return data;
+        if (!salesData || !Array.isArray(salesData) || salesData.length === 0) {
+            console.log(`[Data Collection] No sales history found for: ${marketHashName}`);
+            return false;
         }
-        console.warn(`[Server] No sales history found for ${marketHashName}.`);
-        return null;
+        const data = salesData[0]; // Skinport returns an array, take the first item's data
+        const now = Math.floor(Date.now() / 1000);
+
+        // Update or insert sales history document in MongoDB
+        await db.collection('sales_history').updateOne(
+            { market_hash_name: marketHashName }, // Filter by market_hash_name
+            {
+                $set: { // Set all sales history fields
+                    sales_24h_avg: data.last_24_hours?.avg,
+                    sales_24h_min: data.last_24_hours?.min,
+                    sales_24h_max: data.last_24_hours?.max,
+                    sales_24h_median: data.last_24_hours?.median,
+                    sales_24h_volume: data.last_24_hours?.volume || 0,
+                    sales_7d_avg: data.last_7_days?.avg,
+                    sales_7d_min: data.last_7_days?.min,
+                    sales_7d_max: data.last_7_days?.max,
+                    sales_7d_median: data.last_7_days?.median,
+                    sales_7d_volume: data.last_7_days?.volume || 0,
+                    sales_30d_avg: data.last_30_days?.avg,
+                    sales_30d_min: data.last_30_days?.min,
+                    sales_30d_max: data.last_30_days?.max,
+                    sales_30d_median: data.last_30_days?.median,
+                    sales_30d_volume: data.last_30_days?.volume || 0,
+                    sales_90d_avg: data.last_90_days?.avg,
+                    sales_90d_min: data.last_90_days?.min,
+                    sales_90d_max: data.last_90_days?.max,
+                    sales_90d_median: data.last_90_days?.median,
+                    sales_90d_volume: data.last_90_days?.volume || 0,
+                    last_updated_history: now // Our internal timestamp
+                }
+            },
+            { upsert: true } // Insert if not found, update if found
+        );
+        console.log(`[Data Collection] Updated sales history for: ${marketHashName}`);
+        return true;
     } catch (error) {
-        console.error(`[Server] Failed to fetch sales history for ${marketHashName}:`, error);
-        return null;
+        console.error(`[Data Collection] Error updating sales history for ${marketHashName}:`, error);
+        return false;
     }
 }
 
-// --- Helper function for Outlier Detection (IQR Method) ---
-// This function identifies and removes outliers from a list of numbers (prices).
-function removeOutliersIQR(prices) {
-    if (prices.length < 4) return prices; // Need at least 4 data points for IQR
+// Background data collection worker
+async function runDataCollection() {
+    try {
+        // Step 1: Update all items (uses 1 API request to Skinport)
+        await updateAllItemsData();
 
-    const sortedPrices = [...prices].sort((a, b) => a - b);
-    const q1Index = Math.floor((sortedPrices.length) / 4);
-    const q3Index = Math.ceil((sortedPrices.length * 3) / 4) -1; // Adjusted for 0-based index
-    
-    const q1 = sortedPrices[q1Index];
-    const q3 = sortedPrices[q3Index];
-    const iqr = q3 - q1;
+        // Step 2: Process a batch of items from the queue for sales history (uses more API requests)
+        const queueItems = await db.collection('data_collection_queue')
+            .find({}) // Find all items in the queue
+            .sort({ priority: -1, last_attempted: 1 }) // Sort by priority (desc) and least recently attempted (asc)
+            .limit(7) // Process a small batch (7 items = 7 API requests to /sales/history)
+            .toArray();
+        console.log(`[Data Collection] Processing ${queueItems.length} items from queue`);
 
-    const lowerBound = q1 - 1.5 * iqr;
-    const upperBound = q3 + 1.5 * iqr;
+        for (const item of queueItems) {
+            const success = await updateItemSalesHistory(item.market_hash_name);
 
-    return prices.filter(price => price >= lowerBound && price <= upperBound);
+            // Update queue item based on success
+            if (success) {
+                // Remove from queue if successful
+                await db.collection('data_collection_queue').deleteOne({ market_hash_name: item.market_hash_name });
+            } else {
+                // Update retry count and last attempted time if failed
+                await db.collection('data_collection_queue').updateOne(
+                    { market_hash_name: item.market_hash_name },
+                    {
+                        $set: { last_attempted: Math.floor(Date.now() / 1000) },
+                        $inc: { retry_count: 1 } // Increment retry count
+                    }
+                );
+            }
+        }
+
+        console.log('[Data Collection] Cycle completed');
+    } catch (error) {
+        console.error('[Data Collection] Error in collection cycle:', error);
+    }
 }
 
+// =============================================================================
+// PROFIT ANALYSIS SYSTEM
+// =============================================================================
 
-// --- Helper function to calculate volatility (now on server) ---
-// Calculates a volatility factor based on the spread of prices.
-function calculateVolatility(prices) {
-    if (prices.length < 2) return 0.1; // Default volatility for insufficient data
-
-    const mean = prices.reduce((sum, price) => sum + price, 0) / prices.length;
-    const variance = prices.reduce((sum, price) => sum + Math.pow(price - mean, 2), 0) / prices.length;
-    const stdDev = Math.sqrt(variance);
-    return Math.min(stdDev / mean, 0.5); // Cap volatility at 50% to prevent extreme values
-}
-
-// --- Helper function to calculate liquidity score (now on server) ---
-// Returns a score from 0 to 1 based on sales volumes across different periods and volatility.
-function calculateLiquidityScore(sales24hVolume, sales7dVolume, sales30dVolume, volatilityFactor) {
-    // These are example maximum volumes for highly liquid items.
-    // You should tune these based on actual Skinport data for various item types.
-    const maxExpected24hVolume = 100;
-    const maxExpected7dVolume = 700;
-    const maxExpected30dVolume = 3000;
-
-    // Weighted average of volume contributions, giving more weight to recent volume.
-    // Increased weight for 24h volume for "selling often"
-    const score24h = Math.min(1, sales24hVolume / maxExpected24hVolume) * 0.6; // Higher weight
-    const score7d = Math.min(1, sales7dVolume / maxExpected7dVolume) * 0.3;
-    const score30d = Math.min(1, sales30dVolume / maxExpected30dVolume) * 0.1;
-
-    let totalVolumeScore = score24h + score7d + score30d;
-
-    // Adjust liquidity based on volatility: higher volatility reduces liquidity score
-    // A volatilityFactor of 0.5 (max) would reduce score by 0.5 * 0.5 = 0.25 (example)
-    totalVolumeScore *= (1 - volatilityFactor * 0.5); // Apply a penalty for volatility
-
-    return Math.max(0, Math.min(1, totalVolumeScore)); // Ensure score is between 0 and 1
-}
-
-
-// --- Helper function to calculate achievable price with 99.6% accuracy (now on server) ---
-// This is the core pricing logic, aiming for high accuracy.
-function calculateAchievablePrice(salesHistoryData, currentPrice) {
-    // Handle cases where no sales history is available
-    if (!salesHistoryData || (salesHistoryData.last_24_hours?.volume === 0 && salesHistoryData.last_7_days?.volume === 0 && salesHistoryData.last_30_days?.volume === 0)) {
+function calculateProfitability(currentItem, salesHistory) {
+    if (!salesHistory) {
         return {
-            achievablePrice: currentPrice ? parseFloat((currentPrice * 0.95).toFixed(2)) : null, // Conservative estimate
-            liquidityScore: 0, // No sales, so liquidity is 0
-            confidence: 0.1, // Low confidence if no data
-            reason: "No sales history available."
+            recommendedAction: 'SKIP',
+            confidence: 0,
+            reason: 'No sales history available'
         };
     }
+    const currentPrice = currentItem.current_min_price;
+    const suggestedPrice = currentItem.suggested_price;
 
-    let pricesForVolatility = []; // Collect prices to calculate overall volatility
+    // Calculate weighted average sell price from historical data
+    let weightedPrice = 0;
+    let totalWeight = 0;
 
-    // Extract average prices from sales history for weighted average
+    // Weight recent sales more heavily
     const periods = [
-        { key: 'last_24_hours', weight: 0.6 },
-        { key: 'last_7_days', weight: 0.3 },
-        { key: 'last_30_days', weight: 0.1 }
+        { data: salesHistory, key: '24h', weight: 0.5 },
+        { data: salesHistory, key: '7d', weight: 0.3 },
+        { data: salesHistory, key: '30d', weight: 0.2 }
     ];
 
-    let weightedSum = 0;
-    let totalWeight = 0;
-    let totalSalesVolume = 0;
-
     periods.forEach(period => {
-        const data = salesHistoryData[period.key];
-        if (data && data.volume > 0 && data.avg !== null) {
-            // Add average price to pricesForVolatility for overall volatility calculation
-            pricesForVolatility.push(data.avg);
-            
-            // Use the average price and volume for weighted sum
-            weightedSum += data.avg * data.volume * period.weight;
-            totalWeight += data.volume * period.weight;
-            totalSalesVolume += data.volume;
+        const avg = salesHistory[`sales_${period.key}_avg`];
+        const volume = salesHistory[`sales_${period.key}_volume`];
+
+        if (avg && volume > 0) {
+            weightedPrice += avg * period.weight * Math.min(volume / 10, 1); // Volume factor
+            totalWeight += period.weight * Math.min(volume / 10, 1);
         }
     });
 
-    // If no valid sales data after filtering, use fallback
     if (totalWeight === 0) {
         return {
-            achievablePrice: currentPrice ? parseFloat((currentPrice * 0.92).toFixed(2)) : null,
-            liquidityScore: 0,
-            confidence: 0.2,
-            reason: "Insufficient sales data across all periods after filtering."
+            recommendedAction: 'SKIP',
+            confidence: 0,
+            reason: 'Insufficient sales volume'
         };
     }
 
-    let finalAchievablePrice = weightedSum / totalWeight;
+    const expectedSellPrice = weightedPrice / totalWeight;
+    const sellerFee = 0.12; // 12% Skinport fee
+    const netSellPrice = expectedSellPrice * (1 - sellerFee);
+    const potentialProfit = netSellPrice - currentPrice;
+    const profitMargin = (potentialProfit / currentPrice) * 100;
 
-    // Apply a slight adjustment based on volatility (e.g., lower price for higher volatility)
-    const volatilityFactor = calculateVolatility(pricesForVolatility.length > 0 ? pricesForVolatility : [finalAchievablePrice]);
-    finalAchievablePrice *= (1 - volatilityFactor * 0.05); // Small discount for high volatility
+    // Liquidity score based on recent trading volume
+    const recentVolume = (salesHistory.sales_24h_volume || 0) + (salesHistory.sales_7d_volume || 0);
+    const liquidityScore = Math.min(recentVolume / 50, 1); // Normalize to 0-1
 
-    // --- Calculate Liquidity Score ---
-    const liquidityScore = calculateLiquidityScore(
-        salesHistoryData.last_24_hours?.volume || 0,
-        salesHistoryData.last_7_days?.volume || 0,
-        salesHistoryData.last_30_days?.volume || 0,
-        volatilityFactor // Pass volatility to liquidity calculation
-    );
+    // Confidence based on data quality and consistency
+    let confidence = 0.5;
+    confidence += liquidityScore * 0.3; // More volume = higher confidence
+    confidence += Math.min(totalWeight, 1) * 0.2; // Better data coverage = higher confidence
 
-    // --- Determine Confidence (towards 99.6%) ---
-    // Confidence is higher with more sales volume, lower volatility, and higher liquidity.
-    let confidence = 0.5; // Base confidence
-    confidence += Math.min(0.3, totalSalesVolume / 10000 * 0.3); // Volume boosts confidence (capped)
-    confidence += liquidityScore * 0.2; // Liquidity boosts confidence
-    confidence -= volatilityFactor * 0.3; // Volatility significantly reduces confidence
+    // Price consistency check
+    if (salesHistory.sales_7d_avg && salesHistory.sales_30d_avg) {
+        const priceStability = 1 - Math.abs(salesHistory.sales_7d_avg - salesHistory.sales_30d_avg) / salesHistory.sales_30d_avg;
+        confidence += priceStability * 0.2;
+    }
 
-    // Ensure confidence is between 0 and 1
     confidence = Math.max(0, Math.min(1, confidence));
 
     return {
-        achievablePrice: parseFloat(finalAchievablePrice.toFixed(2)),
+        currentPrice,
+        expectedSellPrice: parseFloat(expectedSellPrice.toFixed(2)),
+        netSellPrice: parseFloat(netSellPrice.toFixed(2)),
+        potentialProfit: parseFloat(potentialProfit.toFixed(2)),
+        profitMargin: parseFloat(profitMargin.toFixed(2)),
         liquidityScore: parseFloat(liquidityScore.toFixed(2)),
         confidence: parseFloat(confidence.toFixed(3)),
-        reason: "Calculated based on weighted historical sales, volume, and volatility."
+        recommendedAction: potentialProfit > 0.50 && profitMargin > 5 && confidence > 0.6 ? 'BUY' : 'SKIP',
+        reason: potentialProfit <= 0 ? 'No profit potential' :
+            profitMargin <= 5 ? 'Profit margin too low' :
+                confidence <= 0.6 ? 'Low confidence in prediction' : 'Good profit opportunity'
     };
 }
 
-// --- API Endpoint: /api/scan-deals (Consolidated for Market Scan) ---
+// =============================================================================
+// API ENDPOINTS
+// =============================================================================
+
+// Scan for profitable deals
 app.post('/api/scan-deals', async (req, res) => {
-    const { skinportMarketUrl, currency, minProfit, source } = req.body;
-    console.log(`[Server] Received /api/scan-deals request. Source: ${source}`);
-
-    if (source !== 'market' || !skinportMarketUrl) {
-        return res.status(400).json({ error: 'Invalid request: only market source with skinportMarketUrl is supported.' });
-    }
-
-    let itemsToAnalyze = [];
-
-    // --- Market Scan Logic ---
-    console.log(`[Server] Processing market scan for URL: ${skinportMarketUrl}`);
-    const urlObj = new URL(skinportMarketUrl);
-    const params = new URLSearchParams(urlObj.search);
-
-    // Filter parameters to send ONLY app_id, currency, tradable to Skinport API
-    const allowedApiParams = {};
-    if (params.has('app_id')) {
-        allowedApiParams.app_id = params.get('app_id');
-    } else {
-        allowedApiParams.app_id = '730'; // Default to CS2 App ID if not specified in URL
-    }
-    if (params.has('currency')) {
-        allowedApiParams.currency = params.get('currency');
-    }
-    if (params.has('tradable')) {
-        allowedApiParams.tradable = params.get('tradable');
-    }
-
     try {
-        // Fetch ALL items matching the filtered parameters from Skinport's /v1/items endpoint.
-        const allSkinportItems = await fetchSkinportApi('/items', allowedApiParams); // Use filtered params
+        // minProfit and minProfitMargin are now the primary filters
+        const { minProfit = 0.50, minProfitMargin = 5, limit = 50, currency } = req.body;
 
-        if (allSkinportItems && allSkinportItems.length > 0) {
-            console.log(`[Server] Fetched ${allSkinportItems.length} items from Skinport /v1/items.`);
-            // Limit the number of items to analyze to prevent excessive API calls
-            // For example, process only the first 20 items from the market list.
-            itemsToAnalyze = allSkinportItems.slice(0, 20).map(item => ({ // <<< Added slice to limit items
-                marketHashName: item.market_hash_name,
-                currentPrice: item.min_price, // Use min_price as the current listed price
-                itemId: item.id,
-                wear: item.wear,
-                isTradable: item.tradable
-            }));
-            console.log(`[Server] Analyzing first ${itemsToAnalyze.length} items from market scan.`);
-        } else {
-            console.log('[Server] No items found for market scan filters.');
-            return res.json({ analyzedItems: [], hasMorePages: false });
+        // Ensure currency is EUR as per user request
+        if (currency !== 'EUR') {
+            console.warn(`[API] Received scan request for currency ${currency}, but backend only supports EUR for analysis.`);
+            // For now, we'll proceed assuming EUR data is desired and analyzed.
         }
+
+        console.log(`[API] Scanning for deals with minProfit: €${minProfit}, minMargin: ${minProfitMargin}% (Currency: EUR)`);
+
+        // Get items with both current data and sales history from MongoDB
+        // We're querying the database, not Skinport API directly here.
+        const items = await db.collection('items').aggregate([
+            {
+                $lookup: { // Join 'items' with 'sales_history'
+                    from: 'sales_history',
+                    localField: 'market_hash_name',
+                    foreignField: 'market_hash_name',
+                    as: 'salesHistoryData'
+                }
+            },
+            {
+                $unwind: { // Deconstructs the salesHistoryData array field from the input documents to output a document for each element.
+                    path: '$salesHistoryData',
+                    preserveNullAndEmptyArrays: true // Keep items even if no sales history found
+                }
+            },
+            {
+                $match: { // Filter items based on criteria
+                    current_quantity: { $gt: 0 }, // Only items with quantity > 0
+                    current_min_price: { $gt: 0 } // Only items with a valid price
+                }
+            },
+            {
+                $limit: limit * 3 // Fetch more items than the requested limit for internal filtering
+            }
+        ]).toArray();
+
+        const analyzedItems = [];
+
+        for (const item of items) {
+            // Pass the sales history data from the lookup
+            const analysis = calculateProfitability(item, item.salesHistoryData);
+
+            // Only include items meeting profit criteria AND recommendedAction 'BUY'
+            if (analysis.potentialProfit >= minProfit &&
+                analysis.profitMargin >= minProfitMargin &&
+                analysis.recommendedAction === 'BUY') {
+
+                analyzedItems.push({
+                    marketHashName: item.market_hash_name,
+                    currentPrice: item.current_min_price,
+                    suggestedPrice: item.suggested_price,
+                    quantity: item.current_quantity,
+                    analysis: analysis, // Full analysis object
+                    // Construct Skinport URL based on market_hash_name
+                    itemUrl: `https://skinport.com/market?item=${encodeURIComponent(item.market_hash_name)}`
+                });
+            }
+        }
+
+        // Sort by profit potential (descending)
+        analyzedItems.sort((a, b) => b.analysis.potentialProfit - a.analysis.potentialProfit);
+
+        res.json({
+            analyzedItems: analyzedItems.slice(0, limit), // Return only up to the requested limit
+            totalFound: analyzedItems.length, // Total items found before final limit
+            timestamp: new Date().toISOString()
+        });
+
     } catch (error) {
-        console.error('[Server] Error fetching market items from Skinport:', error);
-        return res.status(500).json({ error: `Failed to fetch market items: ${error.message}` });
+        console.error('[API] Error in scan-deals:', error);
+        res.status(500).json({ error: error.message });
     }
-
-    let analyzedItems = [];
-    for (const item of itemsToAnalyze) {
-        try {
-            // Fetch sales history for each item
-            const salesHistory = await fetchItemSalesHistory(item.marketHashName, currency); // Use currency from request body
-            // Calculate achievable price based on sales history and the item's current listed price
-            const analysisResult = calculateAchievablePrice(salesHistory, item.currentPrice);
-
-            // For market items, calculate potential profit if buying at currentPrice and selling at achievablePrice
-            const sellerFeeRate = 0.12; // Skinport's typical seller fee (adjust if needed)
-            const netAchievablePrice = analysisResult.achievablePrice ? analysisResult.achievablePrice * (1 - sellerFeeRate) : 0;
-            const potentialProfit = netAchievablePrice - item.currentPrice;
-            const profitPercentage = item.currentPrice > 0 ? (potentialProfit / item.currentPrice) * 100 : -Infinity;
-
-            analyzedItems.push({
-                marketHashName: item.market_hash_name,
-                currentPrice: item.currentPrice,
-                itemId: item.id,
-                wear: item.wear,
-                isTradable: item.isTradable,
-                analysis: analysisResult, // Contains achievablePrice, liquidityScore, confidence
-                potentialProfit: potentialProfit !== null ? parseFloat(potentialProfit.toFixed(2)) : null,
-                profitPercentage: profitPercentage !== null ? parseFloat(profitPercentage.toFixed(2)) : null
-            });
-        } catch (error) {
-            console.error(`[Server] Error analyzing item ${item.marketHashName}:`, error);
-            analyzedItems.push({
-                ...item,
-                analysis: { achievablePrice: null, liquidityScore: 0, confidence: 0, reason: "Analysis failed." },
-                error: error.message
-            });
-        }
-    }
-    res.json({ analyzedItems, hasMorePages: false }); // hasMorePages is always false as /v1/items typically returns all
 });
 
+// Get collection statistics
+app.get('/api/stats', async (req, res) => {
+    try {
+        const totalItems = await db.collection('items').countDocuments();
+        const itemsWithHistory = await db.collection('sales_history').countDocuments();
+        const queueSize = await db.collection('data_collection_queue').countDocuments();
 
-// Start the server
-app.listen(port, () => {
-    console.log(`[Server] Skinport Tracker API listening at http://localhost:${port}`);
+        // Get count of items updated in the last hour
+        const oneHourAgo = Math.floor(Date.now() / 1000) - 3600;
+        const recentlyUpdatedItems = await db.collection('items').countDocuments({
+            last_updated_items: { $gt: oneHourAgo }
+        });
+
+        res.json({
+            total_items: totalItems,
+            items_with_history: itemsWithHistory,
+            queue_size: queueSize,
+            recently_updated_items: recentlyUpdatedItems,
+            collection_progress: totalItems > 0 ? (itemsWithHistory / totalItems * 100).toFixed(1) : 0,
+            last_update: new Date().toISOString()
+        });
+    } catch (error) {
+        console.error('[API] Error in stats:', error);
+        res.status(500).json({ error: error.message });
+    }
 });
+
+// =============================================================================
+// STARTUP AND SCHEDULING
+// =============================================================================
+
+async function startServer() {
+    await connectToMongoDB(); // Connect to MongoDB
+
+    // Start the collection cycle immediately
+    console.log('[Server] Starting initial data collection...');
+    runDataCollection();
+
+    // Schedule data collection every 5 minutes
+    setInterval(runDataCollection, 5 * 60 * 1000);
+
+    app.listen(port, () => {
+        console.log(`[Server] Skinport Tracker running on port ${port}`);
+        console.log(`[Server] Data collection will run every 5 minutes`);
+    });
+}
+
+// Start the server and handle any unhandled rejections
+startServer().catch(console.error);
