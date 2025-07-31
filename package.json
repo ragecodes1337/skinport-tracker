@@ -9,8 +9,8 @@
   "dependencies": {
     "express": "^4.19.2",
     "cors": "^2.8.5",
-    "node-fetch": "^2.7.0",
+    "node-fetch": "2.6.7",  
     "node-cache": "^5.1.2",
-    "p-queue": "^6.6.2"
+    "p-queue": "6.6.2"      
   }
 }
