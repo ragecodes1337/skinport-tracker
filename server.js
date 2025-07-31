@@ -1,13 +1,13 @@
-const express = require('express');
-const cors = require('cors');
-const fetch = require('node-fetch').default; // Use node-fetch for server-side fetches
-const NodeCache = require('node-cache'); // For caching API responses
-const PQueue = require('p-queue').default; // PQueue for server-side rate limiting to Skinport
+// API Server for Skinport Tracker (to be deployed on your Render server)
+import express from 'express';
+import cors from 'cors';
+import fetch from 'node-fetch'; // Still using node-fetch
+import NodeCache from 'node-cache'; // Still using node-cache
 
 const app = express();
 const port = process.env.PORT || 3000; // Use environment port for Render deployment
 
-// Cache for API responses (e.g., Skinport /sales history)
+// Cache for API responses (e.g., Skinport sales history)
 // Cache for 5 minutes (300 seconds) by default, matching Skinport's cache
 const cache = new NodeCache({ stdTTL: 300, checkperiod: 120 });
 
@@ -21,40 +21,77 @@ app.use(express.json()); // Enable parsing of JSON request bodies
 // Skinport API configuration
 const SKINPORT_API_BASE = 'https://api.skinport.com/v1';
 
-// --- Server-side Rate Limiter for Skinport API Calls ---
-// This ensures your Render backend doesn't hit Skinport's rate limits.
-const skinportApiLimiter = new PQueue({
-    concurrency: 1, // Process one request at a time to Skinport to be safe
-    intervalCap: 8, // Max 8 requests
-    interval: 5 * 60 * 1000 // 5 minutes in milliseconds
-});
+// --- Custom Server-side Rate Limiter for Skinport API Calls ---
+// This replaces p-queue. It ensures requests are sent sequentially with a delay.
+const requestQueue = []; // Stores functions to execute
+let isProcessingQueue = false; // Flag to prevent multiple concurrent processing loops
+
+// Configuration for the custom rate limiter (e.g., 1 request every 1 second)
+// Adjust this based on Skinport's actual rate limits if known, or start conservatively.
+const REQUEST_DELAY_MS = 1500; // 1.5 seconds delay between requests to Skinport
+
+// Function to process the queue
+async function processQueue() {
+    if (isProcessingQueue || requestQueue.length === 0) {
+        return; // Already processing or nothing in queue
+    }
+
+    isProcessingQueue = true;
+    while (requestQueue.length > 0) {
+        const { task, resolve, reject } = requestQueue.shift(); // Get the next task
+
+        try {
+            const result = await task(); // Execute the task (fetchSkinportApi call)
+            resolve(result); // Resolve the promise for the original caller
+        } catch (error) {
+            reject(error); // Reject the promise for the original caller
+        }
+
+        // Wait for the defined delay before processing the next request
+        if (requestQueue.length > 0) {
+            await new Promise(res => setTimeout(res, REQUEST_DELAY_MS));
+        }
+    }
+    isProcessingQueue = false;
+    console.log('[Server] Skinport API queue finished processing.');
+}
 
 // --- Helper Function: Make Rate-Limited Fetch Requests to Skinport API from Server ---
-// This is the only function that directly calls api.skinport.com
+// This function now uses our custom queue
 async function fetchSkinportApi(endpoint, params = {}, headers = {}) {
     const queryString = new URLSearchParams(params).toString();
     const url = `${SKINPORT_API_BASE}${endpoint}?${queryString}`;
 
-    console.log(`[Server] Queueing Skinport API call: ${url}`);
-    return skinportApiLimiter.add(async () => {
-        console.log(`[Server] Executing Skinport API call: ${url}`);
-        const response = await fetch(url, {
-            method: 'GET',
-            headers: {
-                'Accept-Encoding': 'br', // Request Brotli compression
-                ...headers
-            }
-        });
+    console.log(`[Server] Adding Skinport API call to custom queue: ${url}`);
+    return new Promise((resolve, reject) => {
+        requestQueue.push({
+            task: async () => {
+                console.log(`[Server] Executing Skinport API call from queue: ${url}`);
+                const response = await fetch(url, {
+                    method: 'GET',
+                    headers: {
+                        'Accept-Encoding': 'br', // Request Brotli compression
+                        ...headers
+                    }
+                });
 
-        if (response.status === 429) {
-            console.warn(`[Server] Skinport API rate limit hit for ${endpoint}. Queue will handle retries.`);
-            throw new Error('Rate limit hit, queueing for retry.');
-        }
-        if (!response.ok) {
-            const errorText = await response.text();
-            throw new Error(`[Server] Skinport API error (${response.status} ${response.statusText}): ${errorText}`);
-        }
-        return response.json();
+                if (response.status === 429) {
+                    console.warn(`[Server] Skinport API rate limit hit for ${endpoint}. Retrying...`);
+                    // Instead of throwing, we might re-queue or implement exponential backoff here.
+                    // For simplicity, we'll let the outer catch handle it for now, which will reject the promise.
+                    throw new Error('Rate limit hit, consider increasing REQUEST_DELAY_MS or implementing retry logic.');
+                }
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    throw new Error(`[Server] Skinport API error (${response.status} ${response.statusText}): ${errorText}`);
+                }
+                return response.json();
+            },
+            resolve,
+            reject
+        });
+        // Start processing the queue if it's not already running
+        processQueue();
     });
 }
 

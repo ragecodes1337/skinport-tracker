@@ -3,14 +3,14 @@
   "version": "1.0.0",
   "description": "Backend for Skinport Tracker Chrome Extension",
   "main": "server.js",
+  "type": "module",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
     "express": "^4.19.2",
     "cors": "^2.8.5",
-    "node-fetch": "2.6.7",  
-    "node-cache": "^5.1.2",
-    "p-queue": "6.6.2"      
+    "node-fetch": "2.6.7",
+    "node-cache": "^5.1.2"
   }
 }
