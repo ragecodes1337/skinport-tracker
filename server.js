@@ -26,9 +26,9 @@ const SKINPORT_API_BASE = 'https://api.skinport.com/v1';
 const requestQueue = []; // Stores functions to execute
 let isProcessingQueue = false; // Flag to prevent multiple concurrent processing loops
 
-// Configuration for the custom rate limiter (e.g., 1 request every 1 second)
-// Adjust this based on Skinport's actual rate limits if known, or start conservatively.
-const REQUEST_DELAY_MS = 1500; // 1.5 seconds delay between requests to Skinport
+// Configuration for the custom rate limiter
+// Increased delay to avoid Skinport API rate limits. 3 seconds should be safer.
+const REQUEST_DELAY_MS = 3000; // <<< Increased to 3 seconds (3000 ms)
 
 // Function to process the queue
 async function processQueue() {
