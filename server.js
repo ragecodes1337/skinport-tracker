@@ -116,49 +116,74 @@ async function fetchHistoricalData(marketHashName, currency) {
 
 // Helper function to process historical data using the aggregated statistics
 function processHistoricalData(data, cleanedMarketHashName, cacheKey) {
-    // Skinport's /v1/sales/history returns aggregated data with periods: 24h, 7d, 30d, 90d
-    // We'll use the 7-day average as it's most relevant for recent pricing trends
+    // Skinport's /v1/sales/history returns an array of objects
+    // Find the item that matches our cleaned market hash name
     
-    if (data && data['7d'] && data['7d'].avg && data['7d'].avg > 0) {
-        const historicalAvgPrice = data['7d'].avg;
-        const salesVolume = data['7d'].volume || 0;
-        
+    console.log(`[API] Processing response data for ${cleanedMarketHashName}:`, JSON.stringify(data, null, 2));
+    
+    if (!Array.isArray(data) || data.length === 0) {
+        console.log(`[API] No data array found or empty array for ${cleanedMarketHashName}`);
+        return null;
+    }
+    
+    // Find the matching item in the response array
+    const itemData = data.find(item => 
+        item.market_hash_name && 
+        item.market_hash_name.toLowerCase().includes(cleanedMarketHashName.toLowerCase())
+    );
+    
+    if (!itemData) {
+        console.log(`[API] No matching item found in response for ${cleanedMarketHashName}`);
+        console.log(`[API] Available items in response:`, data.map(item => item.market_hash_name));
+        return null;
+    }
+    
+    console.log(`[API] Found matching item:`, itemData.market_hash_name);
+    
+    // Try to get 7-day average first, then fallback to 30-day, then 90-day
+    let historicalAvgPrice = null;
+    let salesVolume = 0;
+    let period = null;
+    
+    if (itemData.last_7_days && itemData.last_7_days.avg && itemData.last_7_days.avg > 0) {
+        historicalAvgPrice = itemData.last_7_days.avg;
+        salesVolume = itemData.last_7_days.volume || 0;
+        period = '7 days';
+    } else if (itemData.last_30_days && itemData.last_30_days.avg && itemData.last_30_days.avg > 0) {
+        historicalAvgPrice = itemData.last_30_days.avg;
+        salesVolume = itemData.last_30_days.volume || 0;
+        period = '30 days';
+    } else if (itemData.last_90_days && itemData.last_90_days.avg && itemData.last_90_days.avg > 0) {
+        historicalAvgPrice = itemData.last_90_days.avg;
+        salesVolume = itemData.last_90_days.volume || 0;
+        period = '90 days';
+    }
+    
+    if (historicalAvgPrice && historicalAvgPrice > 0) {
         const result = { 
             historicalAvgPrice,
             salesVolume,
+            period,
             periodData: {
-                '24h': data['24h'],
-                '7d': data['7d'],
-                '30d': data['30d'],
-                '90d': data['90d']
-            }
+                last_24_hours: itemData.last_24_hours,
+                last_7_days: itemData.last_7_days,
+                last_30_days: itemData.last_30_days,
+                last_90_days: itemData.last_90_days
+            },
+            item_page: itemData.item_page,
+            market_page: itemData.market_page
         };
         
         cache.set(cacheKey, result); // Cache the result for 5 minutes
-        console.log(`[API] Found 7-day avg price for ${cleanedMarketHashName}: €${historicalAvgPrice.toFixed(2)} (${salesVolume} sales)`);
-        return result;
-    } else if (data && data['30d'] && data['30d'].avg && data['30d'].avg > 0) {
-        // Fallback to 30-day average if 7-day data is not available
-        const historicalAvgPrice = data['30d'].avg;
-        const salesVolume = data['30d'].volume || 0;
-        
-        const result = { 
-            historicalAvgPrice,
-            salesVolume,
-            periodData: {
-                '24h': data['24h'],
-                '7d': data['7d'],
-                '30d': data['30d'],
-                '90d': data['90d']
-            }
-        };
-        
-        cache.set(cacheKey, result);
-        console.log(`[API] Found 30-day avg price for ${cleanedMarketHashName}: €${historicalAvgPrice.toFixed(2)} (${salesVolume} sales)`);
+        console.log(`[API] Found ${period} avg price for ${cleanedMarketHashName}: €${historicalAvgPrice.toFixed(2)} (${salesVolume} sales)`);
         return result;
     }
     
-    console.log(`[API] No sufficient historical data found for ${cleanedMarketHashName}.`);
+    console.log(`[API] No sufficient historical data found for ${cleanedMarketHashName}. Item data:`, {
+        last_7_days: itemData.last_7_days,
+        last_30_days: itemData.last_30_days,
+        last_90_days: itemData.last_90_days
+    });
     return null;
 }
 
@@ -208,10 +233,13 @@ app.post('/scan', async (req, res) => {
                         current_price: item.current_price,
                         historicalAvgPrice: historicalData.historicalAvgPrice,
                         salesVolume: historicalData.salesVolume,
+                        period: historicalData.period,
                         netSellingPrice,
                         potentialProfit,
                         profitPercentage,
-                        periodData: historicalData.periodData
+                        periodData: historicalData.periodData,
+                        item_page: historicalData.item_page,
+                        market_page: historicalData.market_page
                     });
                 }
             } else {
