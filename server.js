@@ -48,29 +48,30 @@ async function fetchSkinportHistoricalData(market_hash_name) {
     }
 
     const apiUrl = `https://api.skinport.com/v1/items/history?app_id=730&market_hash_name=${encodeURIComponent(market_hash_name)}`;
-    console.log(`[API] Fetching historical data for ${market_hash_name}`);
+    console.log(`[API] Attempting to fetch historical data for: ${market_hash_name}`);
 
     try {
         const response = await fetch(apiUrl);
 
-        // Handle a 404 (Not Found) gracefully
         if (response.status === 404) {
-            console.warn(`[API] Historical data not found for ${market_hash_name}. Skipping item.`);
-            return null;
+            console.warn(`[API] Historical data not found for ${market_hash_name}. Skipping this item.`);
+            return null; // Return null gracefully
         }
-
+        
         if (!response.ok) {
             throw new Error(`Failed to fetch historical data. Status: ${response.status} ${response.statusText}`);
         }
 
         const data = await response.json();
         
-        // The API returns an array, so we check for an empty array
+        // The API returns an array of history data
         if (data && data.length > 0) {
-            cache.set(market_hash_name, data);
-            return data;
+            // Cache the first item in the array, as we are searching for a specific one
+            const itemData = data[0];
+            cache.set(market_hash_name, itemData);
+            return itemData;
         } else {
-            console.warn(`[API] Historical data for ${market_hash_name} is empty. Skipping item.`);
+            console.warn(`[API] Historical data for ${market_hash_name} is empty or malformed. Skipping item.`);
             return null;
         }
     } catch (error) {
@@ -85,33 +86,52 @@ app.use(express.json());
 
 // API route to scan deals
 app.post('/api/scan-deals', async (req, res) => {
+    console.log('[Server] Received a new deal scan request.');
     try {
         const { items, settings } = req.body;
         if (!items || !Array.isArray(items)) {
             return res.status(400).json({ error: 'Invalid request body: "items" array is required.' });
         }
+        console.log(`[Server] Processing ${items.length} items.`);
 
         const analyzedItems = [];
 
-        // Loop through each item and get its historical data
+        // Loop through each item and get its data
         for (const item of items) {
             try {
                 // Fetch historical data for each item
                 const historicalData = await fetchSkinportHistoricalData(item.market_hash_name);
                 
-                // If historical data is available and not an empty array, perform analysis
-                if (historicalData && historicalData.length > 0) {
-                    const totalSales = historicalData.reduce((acc, curr) => acc + curr.price, 0);
-                    const avg_24h = totalSales / historicalData.length;
+                // If historical data is available, perform analysis
+                if (historicalData) {
+                    let historicalAvgPrice;
                     
-                    // The profit is the difference between the average 24h sales price and the current price
-                    const potentialProfit = avg_24h - item.current_price;
-                    const profitPercentage = (potentialProfit / item.current_price) * 100;
+                    // Step 1: Collect historical average price with preference order
+                    if (historicalData.last_7_days?.avg) {
+                        historicalAvgPrice = historicalData.last_7_days.avg;
+                    } else if (historicalData.last_30_days?.avg) {
+                        historicalAvgPrice = historicalData.last_30_days.avg;
+                    } else if (historicalData.last_90_days?.avg) {
+                        historicalAvgPrice = historicalData.last_90_days.avg;
+                    }
 
+                    if (!historicalAvgPrice) {
+                        console.warn(`[Server] No valid historical average price found for ${item.market_hash_name}. Skipping.`);
+                        continue; // Skip to the next item if no valid price is found
+                    }
+
+                    // Step 2: Calculate net selling price with 8% fee
+                    const netSellingPrice = item.current_price * 0.92;
+
+                    // Step 3: Calculate profit margin
+                    const potentialProfit = historicalAvgPrice - netSellingPrice;
+                    const profitPercentage = (potentialProfit / historicalAvgPrice) * 100;
+                    
                     analyzedItems.push({
                         market_hash_name: item.market_hash_name,
                         currentPrice: item.current_price,
-                        avg_24h,
+                        historicalAvgPrice,
+                        netSellingPrice,
                         potentialProfit,
                         profitPercentage
                     });
@@ -121,7 +141,7 @@ app.post('/api/scan-deals', async (req, res) => {
                 // Continue to the next item instead of failing the entire request
             }
         }
-
+        console.log(`[Server] Finished analyzing ${analyzedItems.length} deals.`);
         res.json({ analyzedItems });
 
     } catch (error) {
