@@ -13,100 +13,141 @@ const cache = new NodeCache({ stdTTL: 300, checkperiod: 120 });
 // Skinport API Constants
 const SKINPORT_API_URL = 'https://api.skinport.com/v1';
 const APP_ID_CSGO = 730;
+const CURRENCY = 'EUR';
 
 // Rate limiting configuration - Skinport allows 8 requests per 5 minutes
 const RATE_LIMIT_WINDOW = 5 * 60 * 1000; // 5 minutes in milliseconds
 const MAX_REQUESTS_PER_WINDOW = 8;
-const REQUEST_INTERVAL = RATE_LIMIT_WINDOW / MAX_REQUESTS_PER_WINDOW; // ~37.5 seconds between requests
-
-// Track API requests
-let requestQueue = [];
+const requestQueue = []; // Queue to store timestamps of requests
 
 // Middleware
 app.use(cors());
 app.use(express.json());
 
-// Helper function to delay execution
+/**
+ * Delays execution for a given number of milliseconds.
+ * @param {number} ms The number of milliseconds to wait.
+ * @returns {Promise<void>} A promise that resolves after the delay.
+ */
 function delay(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// Rate limiter that respects Skinport's 8 requests per 5 minutes limit
+/**
+ * A rate limiter that respects Skinport's 8 requests per 5 minutes limit.
+ * It waits if the request queue is full.
+ */
 async function waitForRateLimit() {
     const now = Date.now();
-    requestQueue = requestQueue.filter(timestamp => now - timestamp < RATE_LIMIT_WINDOW);
+    // Remove old requests from the queue
+    while (requestQueue.length > 0 && now - requestQueue[0] > RATE_LIMIT_WINDOW) {
+        requestQueue.shift();
+    }
 
     if (requestQueue.length >= MAX_REQUESTS_PER_WINDOW) {
+        // Queue is full, wait for the oldest request to expire
         const oldestRequestTime = requestQueue[0];
         const timeToWait = (oldestRequestTime + RATE_LIMIT_WINDOW) - now;
         if (timeToWait > 0) {
-            console.log(`[Rate Limiter] Waiting for ${timeToWait}ms...`);
+            console.log(`[Rate Limiter] Waiting ${timeToWait}ms for the next available slot.`);
             await delay(timeToWait);
         }
     }
+    // Add the new request timestamp to the queue
     requestQueue.push(Date.now());
 }
 
-// Function to fetch and analyze prices
-async function analyzePrices(items, settings) {
-    const analyzedItems = [];
-    const minProfit = settings.minProfit || 5;
-    const minProfitMargin = settings.minProfitMargin || 8;
-    const currency = settings.currency || 'EUR';
+/**
+ * Fetches the sales history for an item from the Skinport API.
+ * @param {string} marketHashName The market hash name of the item.
+ * @param {string} currency The currency to use.
+ * @returns {Promise<object|null>} The sales history data or null on error.
+ */
+async function fetchSalesHistory(marketHashName, currency) {
+    const cacheKey = `salesHistory_${marketHashName}_${currency}`;
+    const cachedData = cache.get(cacheKey);
 
-    for (const item of items) {
-        const { marketHashName, price, wear } = item;
-        const cacheKey = `${marketHashName}-${currency}`;
-        let salesHistory;
+    if (cachedData) {
+        console.log(`[Cache] Cache hit for ${marketHashName}`);
+        return cachedData;
+    }
 
-        // Check cache first
-        salesHistory = cache.get(cacheKey);
-
-        if (!salesHistory) {
-            await waitForRateLimit();
-
-            try {
-                const response = await fetch(`${SKINPORT_API_URL}/sales/history?app_id=${APP_ID_CSGO}&market_hash_name=${encodeURIComponent(marketHashName)}&currency=${currency}`);
-
-                if (response.ok) {
-                    salesHistory = await response.json();
-                    if (salesHistory) {
-                        cache.set(cacheKey, salesHistory);
-                    }
-                } else {
-                    console.error(`[Data Collection] Error fetching sales history for ${marketHashName}: ${response.statusText}`);
-                    continue;
-                }
-            } catch (error) {
-                console.error(`[Data Collection] Fetch error for ${marketHashName}:`, error);
-                continue;
-            }
+    try {
+        await waitForRateLimit();
+        const response = await fetch(`${SKINPORT_API_URL}/sales/history/${encodeURIComponent(marketHashName)}?app_id=${APP_ID_CSGO}&currency=${currency}`);
+        
+        if (!response.ok) {
+            console.error(`[API Error] Failed to fetch sales history for ${marketHashName}. Status: ${response.status}`);
+            return null;
         }
 
-        if (salesHistory && salesHistory.length > 0) {
-            // Filter to remove outlier sales (optional, but good practice)
-            const recentSales = salesHistory.filter(sale => sale.last_sale_time * 1000 > Date.now() - (7 * 24 * 60 * 60 * 1000)); // Last 7 days
-            
-            if (recentSales.length > 0) {
-                const totalSalesPrice = recentSales.reduce((sum, sale) => sum + sale.last_sale_price, 0);
-                const averageSalesPrice = totalSalesPrice / recentSales.length;
+        const data = await response.json();
+        // Cache the response
+        cache.set(cacheKey, data);
+        console.log(`[Cache] Cache set for ${marketHashName}`);
+        return data;
+    } catch (error) {
+        console.error(`[Data Fetch] Error fetching sales history for ${marketHashName}: ${error}`);
+        return null;
+    }
+}
 
-                // Calculate profit and profit margin
-                // Skinport takes a 12% commission, with a min of 0.01 EUR.
-                const profit = averageSalesPrice * 0.88 - price;
-                const profitMargin = (profit / price) * 100;
+/**
+ * Calculates the average sales price from the last 7 days of sales.
+ * @param {Array<object>} salesHistory The array of sales history data.
+ * @returns {number|null} The average price or null if no sales in the last 7 days.
+ */
+function getAverageSalesPrice(salesHistory) {
+    const sevenDaysAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
+    const recentSales = salesHistory.filter(sale => new Date(sale.sold_at * 1000) > sevenDaysAgo);
 
-                if (profit >= minProfit && profitMargin >= minProfitMargin) {
-                    analyzedItems.push({
-                        marketHashName,
-                        price,
-                        wear,
-                        averageSalesPrice: averageSalesPrice.toFixed(2),
-                        profit: profit.toFixed(2),
-                        profitMargin: profitMargin.toFixed(2)
-                    });
+    if (recentSales.length === 0) {
+        return null;
+    }
+
+    const totalSalesPrice = recentSales.reduce((sum, sale) => sum + sale.price, 0);
+    return totalSalesPrice / recentSales.length;
+}
+
+/**
+ * Analyzes a list of items to find profitable deals.
+ * @param {Array<object>} items The list of items scraped from Skinport.
+ * @param {number} minProfit The minimum profit threshold.
+ * @param {number} minProfitMargin The minimum profit margin threshold.
+ * @param {string} currency The currency to use.
+ * @returns {Promise<Array<object>>} An array of profitable deals.
+ */
+async function analyzePrices(items, minProfit, minProfitMargin, currency) {
+    const analyzedItems = [];
+    const uniqueItems = new Set(items.map(item => item.marketHashName));
+
+    for (const marketHashName of uniqueItems) {
+        try {
+            const salesHistory = await fetchSalesHistory(marketHashName, currency);
+            if (salesHistory && salesHistory.length > 0) {
+                const averageSalesPrice = getAverageSalesPrice(salesHistory);
+
+                if (averageSalesPrice) {
+                    const marketItems = items.filter(item => item.marketHashName === marketHashName);
+                    for (const { price, wear } of marketItems) {
+                        const profit = averageSalesPrice - price;
+                        const profitMargin = (profit / price) * 100;
+
+                        if (profit >= minProfit && profitMargin >= minProfitMargin) {
+                            analyzedItems.push({
+                                marketHashName,
+                                price,
+                                wear,
+                                averageSalesPrice,
+                                profit: parseFloat(profit.toFixed(2)),
+                                profitMargin: parseFloat(profitMargin.toFixed(2))
+                            });
+                        }
+                    }
                 }
             }
+        } catch (error) {
+            console.error(`[Data Collection] Error processing sales history for ${marketHashName}: ${error}`);
         }
     }
     
@@ -116,14 +157,14 @@ async function analyzePrices(items, settings) {
 // API endpoint to receive prices and return deals
 app.post('/analyze-prices', async (req, res) => {
     const { items, settings } = req.body;
-    if (!items || !Array.isArray(items)) {
-        return res.status(400).json({ error: 'Invalid input. Expected an array of items.' });
+    if (!items || !Array.isArray(items) || !settings) {
+        return res.status(400).json({ error: 'Invalid input. Expected an array of items and settings.' });
     }
 
     console.log(`[Backend] Received ${items.length} items for analysis.`);
 
     try {
-        const analyzedItems = await analyzePrices(items, settings);
+        const analyzedItems = await analyzePrices(items, settings.minProfit, settings.minProfitMargin, settings.currency);
         res.json({ analyzedItems });
     } catch (error) {
         console.error(`[Backend] Failed to analyze prices: ${error}`);
@@ -133,23 +174,13 @@ app.post('/analyze-prices', async (req, res) => {
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-    const now = Date.now();
-    requestQueue = requestQueue.filter(timestamp => now - timestamp < RATE_LIMIT_WINDOW);
-
     res.json({
         status: 'ok',
-        timestamp: new Date().toISOString(),
-        rateLimit: {
-            requestsInLast5Min: requestQueue.length,
-            maxRequests: MAX_REQUESTS_PER_WINDOW,
-            nextAvailableSlot: requestQueue.length >= MAX_REQUESTS_PER_WINDOW ?
-                new Date(Math.min(...requestQueue) + RATE_LIMIT_WINDOW + 1000).toISOString() :
-                'now'
-        }
+        timestamp: new Date().toISOString()
     });
 });
 
 // Start Express server
 app.listen(port, () => {
-    console.log(`Server listening on port ${port}`);
+    console.log(`Skinport Tracker API listening on port ${port}`);
 });
