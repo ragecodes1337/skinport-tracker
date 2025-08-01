@@ -99,7 +99,7 @@ app.post('/api/scan-deals', async (req, res) => {
         // Loop through each item and get its data
         for (const item of items) {
             try {
-                // Fetch historical data for each item
+                // Fetch historical data for each item using the full market_hash_name
                 const historicalData = await fetchSkinportHistoricalData(item.market_hash_name);
                 
                 // If historical data is available, perform analysis
@@ -129,6 +129,7 @@ app.post('/api/scan-deals', async (req, res) => {
                     
                     analyzedItems.push({
                         market_hash_name: item.market_hash_name,
+                        market_hash_name_slug: item.market_hash_name_slug,
                         currentPrice: item.current_price,
                         historicalAvgPrice,
                         netSellingPrice,
