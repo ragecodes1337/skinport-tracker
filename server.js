@@ -2,7 +2,7 @@
 import express from 'express';
 import cors from 'cors';
 import fetch from 'node-fetch';
-import { MongoClient } from 'mongodb';
+import NodeCache from 'node-cache'; // Import NodeCache
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -13,9 +13,14 @@ const APP_ID_CSGO = 730;
 
 // Rate limiting configuration - Skinport allows 8 requests per 5 minutes
 const RATE_LIMIT_WINDOW = 5 * 60 * 1000; // 5 minutes in milliseconds
-const REQUEST_INTERVAL = 37500; // ~37.5 seconds, as 5 mins / 8 requests
+const MAX_REQUESTS_PER_WINDOW = 8;
+const REQUEST_INTERVAL = RATE_LIMIT_WINDOW / MAX_REQUESTS_PER_WINDOW; // ~37.5 seconds between requests
+
+// A cache for API responses to avoid hitting rate limits unnecessarily
+const cache = new NodeCache({ stdTTL: 300, checkperiod: 120 }); // 5 minute cache
 
 // Track API requests
+let requestQueue = [];
 let lastRequestTime = 0;
 
 // Middleware
@@ -30,172 +35,128 @@ function delay(ms) {
 // Rate limiter that respects Skinport's 8 requests per 5 minutes limit
 async function waitForRateLimit() {
     const now = Date.now();
-    const elapsedTime = now - lastRequestTime;
-    if (elapsedTime < REQUEST_INTERVAL) {
-        const timeToWait = REQUEST_INTERVAL - elapsedTime;
-        console.log(`[Rate Limiter] Waiting for ${timeToWait}ms...`);
-        await delay(timeToWait);
-    }
-    lastRequestTime = Date.now();
-}
-
-// MongoDB Connection Variables
-let db;
-let mongoClient;
-
-// Function to connect to MongoDB
-async function connectToMongoDB() {
-    const mongoUri = process.env.MONGO_URI;
-    if (!mongoUri) {
-        console.error('MONGO_URI environment variable is not set!');
-        process.exit(1);
-    }
-
-    try {
-        mongoClient = new MongoClient(mongoUri);
-        await mongoClient.connect();
-        const dbName = new URL(mongoUri).pathname.substring(1) || 'skinport_tracker_db';
-        db = mongoClient.db(dbName);
-
-        // Ensure indexes for efficient querying
-        await db.collection('sales_history').createIndex({ market_hash_name: 1 }, { unique: true });
-
-        console.log('[Server] Successfully connected to MongoDB.');
-    } catch (error) {
-        console.error('[Server] Failed to connect to MongoDB:', error);
-        throw error;
-    }
-}
-
-// Function to fetch and cache historical data for a specific item
-async function fetchAndCacheHistoricalData(marketHashName, currency) {
-    // Check if data is already in the database and not too old
-    const existingData = await db.collection('sales_history').findOne({ market_hash_name: marketHashName });
-    const isStale = existingData && (new Date() - existingData.lastUpdated) > (24 * 60 * 60 * 1000); // 24 hours
-
-    if (existingData && !isStale) {
-        // Use cached data if it's fresh
-        return existingData.averagePrice;
-    }
-
-    // If data is missing or stale, fetch it from the Skinport API
-    await waitForRateLimit();
-    const apiUrl = `${SKINPORT_API_URL}/sales/history?app_id=${APP_ID_CSGO}&currency=${currency}&market_hash_name=${encodeURIComponent(marketHashName)}`;
     
-    try {
-        const response = await fetch(apiUrl);
-        if (!response.ok) {
-            throw new Error(`Failed to fetch sales history for ${marketHashName}: ${response.statusText}`);
+    // Clean up old requests from the queue
+    requestQueue = requestQueue.filter(timestamp => now - timestamp < RATE_LIMIT_WINDOW);
+
+    if (requestQueue.length >= MAX_REQUESTS_PER_WINDOW) {
+        // If the queue is full, we must wait for the oldest request to expire
+        const timeToWait = (requestQueue[0] + RATE_LIMIT_WINDOW) - now;
+        console.log(`[Rate Limiter] Waiting for ${timeToWait}ms...`);
+        await delay(timeToWait + 1000); // Add a small buffer
+    } else {
+        // If not full, but last request was too recent, wait for the interval
+        const timeSinceLastRequest = now - lastRequestTime;
+        const timeToWait = REQUEST_INTERVAL - timeSinceLastRequest;
+        if (timeToWait > 0) {
+            console.log(`[Rate Limiter] Waiting for ${timeToWait}ms...`);
+            await delay(timeToWait);
         }
-        const salesHistory = await response.json();
-        
-        if (salesHistory.length > 0) {
-            // Calculate historical average price
-            const averagePrice = salesHistory.reduce((sum, sale) => sum + sale.price, 0) / salesHistory.length;
-            
-            // Save or update the sales history data in MongoDB
-            await db.collection('sales_history').updateOne(
-                { market_hash_name: marketHashName },
-                {
-                    $set: {
-                        market_hash_name: marketHashName,
-                        history: salesHistory,
-                        averagePrice: averagePrice,
-                        lastUpdated: new Date()
-                    }
-                },
-                { upsert: true }
-            );
-            return averagePrice;
-        }
-    } catch (error) {
-        console.error(`[Data Collection] Error processing sales history for ${marketHashName}:`, error.message);
     }
 
-    return null; // Return null if fetching fails
+    // Record the new request time
+    const newRequestTime = Date.now();
+    requestQueue.push(newRequestTime);
+    lastRequestTime = newRequestTime;
 }
 
+// Function to fetch and process sales history
+async function getSalesHistory(item) {
+    const cacheKey = `sales_history_${item.marketHashName}`;
+    const cachedData = cache.get(cacheKey);
+    if (cachedData) {
+        return cachedData;
+    }
 
-// Endpoint to handle deal analysis requests from the extension
+    await waitForRateLimit();
+    
+    const url = `${SKINPORT_API_URL}/sales/history?app_id=${APP_ID_CSGO}&market_hash_name=${encodeURIComponent(item.marketHashName)}`;
+    console.log(`[Data Collection] Fetching sales history for: ${item.marketHashName}`);
+
+    const response = await fetch(url, {
+        headers: {
+            'Accept': 'application/json' // Explicitly set the Accept header
+        }
+    });
+
+    if (!response.ok) {
+        throw new Error(`Failed to fetch sales history for ${item.marketHashName}: ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    cache.set(cacheKey, data);
+    return data;
+}
+
+// Function to analyze scraped items
+async function analyzeItems(items, minProfit, minProfitMargin) {
+    const analyzedItems = [];
+
+    for (const item of items) {
+        try {
+            // Fetch sales history for each item
+            const history = await getSalesHistory(item);
+            if (!history || history.length === 0) {
+                console.warn(`[Analysis] Skipping ${item.marketHashName} - no sales history found.`);
+                continue;
+            }
+
+            // Calculate average sales price from the last 7 days
+            const now = Date.now();
+            const sevenDaysAgo = now - (7 * 24 * 60 * 60 * 1000);
+            
+            const recentSales = history.filter(sale => new Date(sale.sold_at).getTime() > sevenDaysAgo);
+            
+            if (recentSales.length === 0) {
+                console.warn(`[Analysis] Skipping ${item.marketHashName} - no recent sales data.`);
+                continue;
+            }
+
+            const totalSalesPrice = recentSales.reduce((sum, sale) => sum + sale.price, 0);
+            const averageSalesPrice = totalSalesPrice / recentSales.length;
+
+            const profit = item.price - averageSalesPrice;
+            const profitMargin = (profit / averageSalesPrice) * 100;
+            
+            if (profit > minProfit && profitMargin > minProfitMargin) {
+                analyzedItems.push({
+                    ...item,
+                    averageSalesPrice: averageSalesPrice,
+                    profit: profit,
+                    profitMargin: profitMargin,
+                });
+            }
+        } catch (error) {
+            console.error(`[Data Collection] Error processing sales history for ${item.marketHashName}: ${error.message}`);
+        }
+    }
+
+    return analyzedItems;
+}
+
+// Endpoint to analyze scraped items
 app.post('/api/items/analyze', async (req, res) => {
     const { items, minProfit, minProfitMargin } = req.body;
-
+    
     if (!items || !Array.isArray(items)) {
-        return res.status(400).json({ error: 'Invalid input: "items" array is required.' });
+        return res.status(400).json({ error: 'Invalid request body. "items" array is required.' });
     }
 
     try {
-        const analyzedItems = [];
-        const currency = 'EUR'; // Hardcoded for this example
-        const exchangeRate = 1.0; // Assuming 1.0 for EUR
-
-        for (const item of items) {
-            const historicalAvgPrice = await fetchAndCacheHistoricalData(item.market_hash_name, currency);
-
-            if (historicalAvgPrice) {
-                const netSellingPrice = historicalAvgPrice * (1 - 0.15); // 15% Skinport fee
-                const potentialProfit = (netSellingPrice - item.current_price) * exchangeRate;
-                const profitPercentage = (potentialProfit / item.current_price) * 100;
-
-                const analysis = {
-                    historicalAvgPrice,
-                    netSellingPrice,
-                    potentialProfit,
-                    profitPercentage
-                };
-
-                if (potentialProfit >= minProfit && profitPercentage >= minProfitMargin) {
-                    analyzedItems.push({ ...item, analysis });
-                }
-            }
-        }
-
+        const analyzedItems = await analyzeItems(items, minProfit, minProfitMargin);
         res.json({ analyzedItems });
     } catch (error) {
-        console.error('Error analyzing items:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        console.error('Error during item analysis:', error);
+        res.status(500).json({ error: 'An internal server error occurred.' });
     }
 });
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-    res.json({ status: 'ok', timestamp: new Date().toISOString() });
+    res.json({ status: 'ok' });
 });
 
-// Start the server
-async function startServer() {
-    try {
-        await connectToMongoDB();
-        app.listen(port, () => {
-            console.log(`[Server] Skinport Tracker running on port ${port}`);
-        });
-
-        // Graceful shutdown handling
-        process.on('SIGINT', async () => {
-            try {
-                console.log('[Server] Shutting down gracefully...');
-                await mongoClient?.close();
-                process.exit(0);
-            } catch (error) {
-                console.error('[Server] Error during shutdown:', error);
-                process.exit(1);
-            }
-        });
-    } catch (error) {
-        console.error('[Server] Failed to start server:', error);
-        process.exit(1);
-    }
-}
-
-// Global error handlers
-process.on('unhandledRejection', (error) => {
-    console.error('[Server] Unhandled rejection:', error);
+// Start Express server
+app.listen(port, () => {
+    console.log(`Server is running on port ${port}`);
 });
-
-process.on('uncaughtException', (error) => {
-    console.error('[Server] Uncaught exception:', error);
-    // Attempt graceful shutdown
-    mongoClient?.close().finally(() => process.exit(1));
-});
-
-startServer();
