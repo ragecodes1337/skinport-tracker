@@ -19,25 +19,18 @@ app.use(cors());
 app.use(express.json());
 
 // Function to fetch historical data from Skinport API with caching
-async function fetchHistoricalData(marketHashName, currency) {
-    // Clean the market hash name by removing common prefixes that may cause API errors
-    const cleanedMarketHashName = marketHashName
-        .replace(/★\s*/, '') // Remove the star prefix
-        .replace(/StatTrak™\s*/, '') // Remove StatTrak prefix
-        .replace(/Souvenir\s*/, '') // Remove Souvenir prefix
-        .trim();
-
-    const cacheKey = `historical_${cleanedMarketHashName}_${currency}`;
+async function fetchHistoricalData(marketHashNameSlug, currency) {
+    const cacheKey = `historical_${marketHashNameSlug}_${currency}`;
     const cachedData = cache.get(cacheKey);
     if (cachedData) {
-        console.log(`[API] Cache hit for ${marketHashName}.`);
+        console.log(`[API] Cache hit for ${marketHashNameSlug}.`);
         return cachedData;
     }
 
     try {
-        const url = `${SKINPORT_API_URL}/sales/history?app_id=${APP_ID_CSGO}&currency=${currency}&market_hash_name=${encodeURIComponent(cleanedMarketHashName)}`;
+        const url = `${SKINPORT_API_URL}/sales/history?app_id=${APP_ID_CSGO}&currency=${currency}&market_hash_name=${encodeURIComponent(marketHashNameSlug)}`;
         
-        console.log(`[API] Fetching historical data for: ${cleanedMarketHashName}`);
+        console.log(`[API] Fetching historical data for: ${marketHashNameSlug}`);
         console.log(`[API] Request URL: ${url}`); // Log the full URL for debugging
         
         const response = await fetch(url, {
@@ -70,11 +63,11 @@ async function fetchHistoricalData(marketHashName, currency) {
         }
         
         // No data or no recent sales found
-        console.log(`[API] Historical data not found or insufficient for ${cleanedMarketHashName}.`);
+        console.log(`[API] Historical data not found or insufficient for ${marketHashNameSlug}.`);
         return null;
 
     } catch (error) {
-        console.error(`[API] Error fetching historical data for ${cleanedMarketHashName}:`, error);
+        console.error(`[API] Error fetching historical data for ${marketHashNameSlug}:`, error);
         return null;
     }
 }
@@ -89,8 +82,8 @@ app.post('/scan', async (req, res) => {
 
     // Analyze each item from the request
     for (const item of items) {
-        // Fetch real historical data using the Skinport API
-        const historicalData = await fetchHistoricalData(item.market_hash_name, settings.currency);
+        // Fetch real historical data using the Skinport API with the item slug
+        const historicalData = await fetchHistoricalData(item.market_hash_name_slug, settings.currency);
 
         if (historicalData) {
             console.log(`[Server] Historical data found for ${item.market_hash_name}.`);
