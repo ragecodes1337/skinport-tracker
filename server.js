@@ -3,193 +3,126 @@ import express from 'express';
 import cors from 'cors';
 import fetch from 'node-fetch';
 import NodeCache from 'node-cache';
-import { MongoClient } from 'mongodb';
 
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Cache for API responses (5 minutes = 300 seconds)
+// Cache for API responses (5 minutes = 300 seconds, matching the Skinport cache)
 const cache = new NodeCache({ stdTTL: 300, checkperiod: 120 });
 
-// MongoDB Connection Variables
-let db;
-let mongoClient;
-
-// Function to connect to MongoDB
-async function connectToMongoDB() {
-    const mongoUri = process.env.MONGO_URI;
-    if (!mongoUri) {
-        console.error('MONGO_URI environment variable is not set!');
-        process.exit(1);
-    }
-
-    try {
-        mongoClient = new MongoClient(mongoUri);
-        await mongoClient.connect();
-        const dbName = new URL(mongoUri).pathname.substring(1) || 'skinport_tracker_db';
-        db = mongoClient.db(dbName);
-
-        // Ensure indexes
-        await db.collection('items').createIndex({ market_hash_name: 1 }, { unique: true });
-        await db.collection('sales_history').createIndex({ market_hash_name: 1 }, { unique: true });
-        console.log('[Server] Connected to MongoDB successfully.');
-    } catch (error) {
-        console.error('[Server] Failed to connect to MongoDB:', error);
-        throw error;
-    }
-}
-
-// Function to fetch historical data from Skinport API
-async function fetchSkinportHistoricalData(market_hash_name) {
-    const cachedData = cache.get(market_hash_name);
-    if (cachedData) {
-        console.log(`[Cache] Cache hit for ${market_hash_name}`);
-        return cachedData;
-    }
-
-    const apiUrl = `https://api.skinport.com/v1/items/history?app_id=730&market_hash_name=${encodeURIComponent(market_hash_name)}`;
-    console.log(`[API] Attempting to fetch historical data for: ${market_hash_name}`);
-
-    try {
-        const response = await fetch(apiUrl);
-
-        if (response.status === 404) {
-            console.warn(`[API] Historical data not found for ${market_hash_name}. Skipping this item.`);
-            return null; // Return null gracefully
-        }
-        
-        if (!response.ok) {
-            throw new Error(`Failed to fetch historical data. Status: ${response.status} ${response.statusText}`);
-        }
-
-        const data = await response.json();
-        
-        // The API returns an array of history data
-        if (data && data.length > 0) {
-            // Cache the first item in the array, as we are searching for a specific one
-            const itemData = data[0];
-            cache.set(market_hash_name, itemData);
-            return itemData;
-        } else {
-            console.warn(`[API] Historical data for ${market_hash_name} is empty or malformed. Skipping item.`);
-            return null;
-        }
-    } catch (error) {
-        console.error(`[API] Error fetching data for ${market_hash_name}:`, error.message);
-        throw error;
-    }
-}
+// Skinport API Constants
+const SKINPORT_API_URL = 'https://api.skinport.com/v1';
+const APP_ID_CSGO = 730;
 
 // Middleware
 app.use(cors());
 app.use(express.json());
 
-// API route to scan deals
-app.post('/api/scan-deals', async (req, res) => {
-    console.log('[Server] Received a new deal scan request.');
-    try {
-        const { items, settings } = req.body;
-        if (!items || !Array.isArray(items)) {
-            return res.status(400).json({ error: 'Invalid request body: "items" array is required.' });
-        }
-        console.log(`[Server] Processing ${items.length} items.`);
-
-        const analyzedItems = [];
-
-        // Loop through each item and get its data
-        for (const item of items) {
-            try {
-                // Fetch historical data for each item using the full market_hash_name
-                const historicalData = await fetchSkinportHistoricalData(item.market_hash_name);
-                
-                // If historical data is available, perform analysis
-                if (historicalData) {
-                    let historicalAvgPrice;
-                    
-                    // Step 1: Collect historical average price with preference order
-                    if (historicalData.last_7_days?.avg) {
-                        historicalAvgPrice = historicalData.last_7_days.avg;
-                    } else if (historicalData.last_30_days?.avg) {
-                        historicalAvgPrice = historicalData.last_30_days.avg;
-                    } else if (historicalData.last_90_days?.avg) {
-                        historicalAvgPrice = historicalData.last_90_days.avg;
-                    }
-
-                    if (!historicalAvgPrice) {
-                        console.warn(`[Server] No valid historical average price found for ${item.market_hash_name}. Skipping.`);
-                        continue; // Skip to the next item if no valid price is found
-                    }
-
-                    // Step 2: Calculate net selling price with 8% fee
-                    const netSellingPrice = item.current_price * 0.92;
-
-                    // Step 3: Calculate profit margin
-                    const potentialProfit = historicalAvgPrice - netSellingPrice;
-                    const profitPercentage = (potentialProfit / historicalAvgPrice) * 100;
-                    
-                    analyzedItems.push({
-                        market_hash_name: item.market_hash_name,
-                        market_hash_name_slug: item.market_hash_name_slug,
-                        currentPrice: item.current_price,
-                        historicalAvgPrice,
-                        netSellingPrice,
-                        potentialProfit,
-                        profitPercentage
-                    });
-                }
-            } catch (itemError) {
-                console.error(`[Server] Error processing item ${item.market_hash_name}:`, itemError);
-                // Continue to the next item instead of failing the entire request
-            }
-        }
-        console.log(`[Server] Finished analyzing ${analyzedItems.length} deals.`);
-        res.json({ analyzedItems });
-
-    } catch (error) {
-        console.error('[Server] API route error:', error);
-        res.status(500).json({ error: 'Internal Server Error' });
+// Function to fetch historical data from Skinport API with caching
+async function fetchHistoricalData(marketHashName, currency) {
+    const cacheKey = `historical_${marketHashName}_${currency}`;
+    const cachedData = cache.get(cacheKey);
+    if (cachedData) {
+        console.log(`[API] Cache hit for ${marketHashName}.`);
+        return cachedData;
     }
-});
 
-// Start the server and connect to MongoDB
-async function startServer() {
     try {
-        await connectToMongoDB();
+        const url = `${SKINPORT_API_URL}/sales/history?app_id=${APP_ID_CSGO}&currency=${currency}&market_hash_name=${encodeURIComponent(marketHashName)}`;
         
-        // Start Express server
-        app.listen(port, () => {
-            console.log(`[Server] Skinport Tracker running on port ${port}`);
-        });
-
-        // Graceful shutdown handling
-        process.on('SIGINT', async () => {
-            try {
-                console.log('[Server] Shutting down gracefully...');
-                await mongoClient?.close();
-                process.exit(0);
-            } catch (error) {
-                console.error('[Server] Error during shutdown:', error);
-                process.exit(1);
+        console.log(`[API] Fetching historical data for: ${marketHashName}`);
+        const response = await fetch(url, {
+            headers: {
+                'Accept-Encoding': 'br'
             }
         });
 
+        if (!response.ok) {
+            throw new Error(`API request failed with status: ${response.status}`);
+        }
+
+        const data = await response.json();
+
+        if (data.length > 0) {
+            // Find the average price from the last week
+            const oneWeekAgo = new Date();
+            oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
+
+            const recentSales = data.filter(sale => new Date(sale.timestamp) > oneWeekAgo);
+
+            if (recentSales.length > 0) {
+                const totalPrices = recentSales.reduce((sum, sale) => sum + sale.price, 0);
+                const historicalAvgPrice = totalPrices / recentSales.length;
+
+                const result = { historicalAvgPrice };
+                cache.set(cacheKey, result); // Cache the result
+                return result;
+            }
+        }
+        
+        // No data or no recent sales found
+        console.log(`[API] Historical data not found or insufficient for ${marketHashName}.`);
+        return null;
+
     } catch (error) {
-        console.error('[Server] Failed to start server:', error);
-        process.exit(1);
+        console.error(`[API] Error fetching historical data for ${marketHashName}:`, error);
+        return null;
     }
 }
 
-// Global error handlers
-process.on('unhandledRejection', (error) => {
-    console.error('[Server] Unhandled rejection:', error);
+// Main analysis endpoint
+app.post('/scan', async (req, res) => {
+    console.log('[Server] Received a new deal scan request.');
+    const { items, settings } = req.body;
+    console.log(`[Server] Processing ${items.length} items.`);
+
+    const analyzedItems = [];
+
+    // Analyze each item from the request
+    for (const item of items) {
+        // Fetch real historical data using the Skinport API
+        const historicalData = await fetchHistoricalData(item.market_hash_name, settings.currency);
+
+        if (historicalData) {
+            console.log(`[Server] Historical data found for ${item.market_hash_name}.`);
+
+            // Perform profit calculation based on the real historical data
+            const skinportFee = 0.12;
+            const netSellingPrice = historicalData.historicalAvgPrice * (1 - skinportFee);
+            const potentialProfit = netSellingPrice - item.current_price;
+            const profitPercentage = (potentialProfit / item.current_price) * 100;
+
+            // Only add to the list if it meets the profit criteria
+            if (potentialProfit >= settings.minProfit && profitPercentage >= settings.minProfitMargin) {
+                analyzedItems.push({
+                    market_hash_name: item.market_hash_name,
+                    market_hash_name_slug: item.market_hash_name_slug,
+                    current_price: item.current_price,
+                    historicalAvgPrice: historicalData.historicalAvgPrice,
+                    netSellingPrice,
+                    potentialProfit,
+                    profitPercentage
+                });
+            }
+        } else {
+            console.log(`[Server] Historical data not found for ${item.market_hash_name}. Skipping this item.`);
+        }
+    }
+
+    console.log(`[Server] Finished analyzing ${analyzedItems.length} deals.`);
+    res.json({ analyzedItems });
 });
 
-process.on('uncaughtException', (error) => {
-    console.error('[Server] Uncaught exception:', error);
-    // Attempt graceful shutdown
-    mongoClient?.close().finally(() => {
-        process.exit(1);
-    });
-});
+// A dummy function to simulate a background data collection process
+async function runDataCollection() {
+    console.log('[Server] Data collection function running...');
+    // In a real server, this would be where you would call the API for popular items
+    // and store them in a persistent database.
+    // For this example, it's a placeholder.
+}
 
-startServer();
+// Start Express server
+app.listen(port, () => {
+    console.log(`[Server] Skinport Tracker running on port ${port}`);
+    runDataCollection();
+});
