@@ -3,71 +3,62 @@ import express from 'express';
 import cors from 'cors';
 import fetch from 'node-fetch';
 import NodeCache from 'node-cache';
-import { MongoClient } from 'mongodb'; // Import MongoClient for MongoDB operations
+import { MongoClient } from 'mongodb';
+
+// Queue system for rate limiting
+const requestQueue = [];
+let isProcessingQueue = false;
 
 const app = express();
-const port = process.env.PORT || 3000; // Use environment port for Render deployment
+const port = process.env.PORT || 3000;
 
-// Cache for API responses (e.g., Skinport sales history)
-// Cache for 5 minutes (300 seconds) by default, matching Skinport's cache
+// Cache for API responses (5 minutes = 300 seconds)
 const cache = new NodeCache({ stdTTL: 300, checkperiod: 120 });
 
 // MongoDB Connection Variables
-let db; // This will hold our MongoDB database object
-let mongoClient; // This will hold the MongoDB client instance
+let db;
+let mongoClient;
 
 // Function to connect to MongoDB
 async function connectToMongoDB() {
-    // Retrieve MongoDB URI from environment variables (set on Render dashboard)
     const mongoUri = process.env.MONGO_URI;
     if (!mongoUri) {
-        console.error('MONGO_URI environment variable is not set! Cannot connect to database.');
-        process.exit(1); // Exit the process if the URI is missing
+        console.error('MONGO_URI environment variable is not set!');
+        process.exit(1);
     }
 
     try {
         mongoClient = new MongoClient(mongoUri);
-        await mongoClient.connect(); // Connect to the MongoDB cluster
-        // Extract database name from the URI or use a default
+        await mongoClient.connect();
         const dbName = new URL(mongoUri).pathname.substring(1) || 'skinport_tracker_db';
-        db = mongoClient.db(dbName); // Get the database instance
+        db = mongoClient.db(dbName);
 
-        // Ensure indexes for efficient querying in MongoDB
-        // For 'items' collection
+        // Ensure indexes
         await db.collection('items').createIndex({ market_hash_name: 1 }, { unique: true });
-        // For 'sales_history' collection
         await db.collection('sales_history').createIndex({ market_hash_name: 1 }, { unique: true });
-        // For 'data_collection_queue' collection
         await db.collection('data_collection_queue').createIndex({ priority: -1, last_attempted: 1 });
 
-        console.log(`[Database] Connected to MongoDB database: ${dbName} and indexes ensured.`);
+        console.log(`[Database] Connected to MongoDB: ${dbName}`);
     } catch (error) {
-        console.error('[Database] Failed to connect to MongoDB:', error);
-        process.exit(1); // Exit if database connection fails
+        console.error('[Database] Connection failed:', error);
+        process.exit(1);
     }
 }
 
 // Middleware
 app.use(cors({
-    origin: ['https://skinport.com', 'chrome-extension://*'], // Allow requests from Skinport and your extension
+    origin: ['https://skinport.com', 'chrome-extension://*'],
     credentials: true
 }));
-app.use(express.json()); // Enable parsing of JSON request bodies
+app.use(express.json());
 
 // Skinport API configuration
 const SKINPORT_API_BASE = 'https://api.skinport.com/v1';
 
-// --- Custom Server-side Rate Limiter for Skinport API Calls ---
-// This ensures requests are sent sequentially with a delay.
-const requestQueue = []; // Stores functions to execute
-let isProcessingQueue = false; // Flag to prevent multiple concurrent processing loops
-
-// Configuration for the custom rate limiter
-// Increased delay to avoid Skinport API rate limits. 5 seconds should be very safe.
-const REQUEST_DELAY_MS = 5000; // 5 seconds (5000 ms)
-const MAX_RETRIES = 3; // Max retries for rate limit errors
-const RETRY_DELAY_MS = 10000; // 10 seconds delay before retrying a rate-limited request
-
+// Rate Limiter Configuration
+const REQUEST_DELAY_MS = 37500; // 37.5 seconds (8 requests per 5 minutes)
+const MAX_RETRIES = 3;
+const RETRY_DELAY_MS = 10000;
 // Request counter for the rate limit window
 let requestCount = 0;
 let windowStartTime = Date.now();
@@ -255,7 +246,7 @@ async function runDataCollection() {
         const queueItems = await db.collection('data_collection_queue')
             .find({}) // Find all items in the queue
             .sort({ priority: -1, last_attempted: 1 }) // Sort by priority (desc) and least recently attempted (asc)
-            .limit(7) // Process a small batch (7 items = 7 API requests to /sales/history)
+            .limit(2) // Process a small batch (2 items = 2 API requests to /sales/history)
             .toArray();
         console.log(`[Data Collection] Processing ${queueItems.length} items from queue`);
 
@@ -305,9 +296,9 @@ function calculateProfitability(currentItem, salesHistory) {
 
     // Weight recent sales more heavily
     const periods = [
-        { data: salesHistory, key: '24h', weight: 0.5 },
+        { data: salesHistory, key: '24h', weight: 0.6 },
         { data: salesHistory, key: '7d', weight: 0.3 },
-        { data: salesHistory, key: '30d', weight: 0.2 }
+        { data: salesHistory, key: '30d', weight: 0.1 }
     ];
 
     periods.forEach(period => {
@@ -329,7 +320,7 @@ function calculateProfitability(currentItem, salesHistory) {
     }
 
     const expectedSellPrice = weightedPrice / totalWeight;
-    const sellerFee = 0.12; // 12% Skinport fee
+    const sellerFee = 0.08; // 8% Skinport fee
     const netSellPrice = expectedSellPrice * (1 - sellerFee);
     const potentialProfit = netSellPrice - currentPrice;
     const profitMargin = (potentialProfit / currentPrice) * 100;
@@ -351,7 +342,7 @@ function calculateProfitability(currentItem, salesHistory) {
 
     confidence = Math.max(0, Math.min(1, confidence));
 
-    return {
+   return {
         currentPrice,
         expectedSellPrice: parseFloat(expectedSellPrice.toFixed(2)),
         netSellPrice: parseFloat(netSellPrice.toFixed(2)),
@@ -359,10 +350,17 @@ function calculateProfitability(currentItem, salesHistory) {
         profitMargin: parseFloat(profitMargin.toFixed(2)),
         liquidityScore: parseFloat(liquidityScore.toFixed(2)),
         confidence: parseFloat(confidence.toFixed(3)),
-        recommendedAction: potentialProfit > 0.50 && profitMargin > 5 && confidence > 0.6 ? 'BUY' : 'SKIP',
-        reason: potentialProfit <= 0 ? 'No profit potential' :
-            profitMargin <= 5 ? 'Profit margin too low' :
-                confidence <= 0.6 ? 'Low confidence in prediction' : 'Good profit opportunity'
+        recommendedAction: potentialProfit > 1 && // Increased from 0.50 to 1 EUR
+            profitMargin > 8 && // Increased from 5% to 8%
+            confidence > 0.65 && // Increased from 0.6 to 0.65
+            liquidityScore > 0.4 && // Added minimum liquidity requirement
+            salesHistory.sales_24h_volume > 0 ? 'BUY' : 'SKIP', // Must have recent sales
+        reason: potentialProfit <= 1 ? 'Insufficient profit' :
+            profitMargin <= 8 ? 'Profit margin too low' :
+            confidence <= 0.65 ? 'Low confidence' :
+            liquidityScore <= 0.4 ? 'Poor liquidity' :
+            salesHistory.sales_24h_volume === 0 ? 'No recent sales' :
+            'Good profit opportunity'
     };
 }
 
@@ -480,6 +478,36 @@ app.post('/api/scan-deals', async (req, res) => {
     }
 });
 
+// Update current prices for items
+app.post('/api/update-current-prices', async (req, res) => {
+    try {
+        const { items } = req.body;
+        const now = Math.floor(Date.now() / 1000);
+        
+        for (const item of items) {
+            await db.collection('items').updateOne(
+                { market_hash_name: item.market_hash_name },
+                {
+                    $set: {
+                        current_min_price: item.current_price,
+                        current_quantity: item.quantity,
+                        last_updated_items: now
+                    },
+                    $setOnInsert: {
+                        created_at: now
+                    }
+                },
+                { upsert: true }
+            );
+        }
+        console.log(`[API] Updated prices for ${items.length} items from extension`);
+        res.json({ success: true, updated: items.length });
+    } catch (error) {
+        console.error('[API] Error updating prices:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // Get collection statistics
 app.get('/api/stats', async (req, res) => {
     try {
@@ -512,20 +540,67 @@ app.get('/api/stats', async (req, res) => {
 // =============================================================================
 
 async function startServer() {
-    await connectToMongoDB(); // Connect to MongoDB
+    try {
+        await connectToMongoDB(); // Connect to MongoDB
 
-    // Start the collection cycle immediately for sales history queue processing
-    console.log('[Server] Starting initial data collection (processing queue)...');
-    runDataCollection();
+        // Handle MongoDB disconnections
+        mongoClient.on('close', () => {
+            console.warn('[Database] MongoDB connection closed. Attempting to reconnect...');
+            setTimeout(connectToMongoDB, 5000);
+        });
 
-    // Schedule data collection (processing queue) every 5 minutes
-    setInterval(runDataCollection, 5 * 60 * 1000);
+        mongoClient.on('timeout', () => {
+            console.warn('[Database] MongoDB operation timeout. Reconnecting...');
+            mongoClient.close().then(() => connectToMongoDB());
+        });
 
-    app.listen(port, () => {
-        console.log(`[Server] Skinport Tracker running on port ${port}`);
-        console.log(`[Server] Data collection queue will be processed every 5 minutes`);
-    });
+        // Start the collection cycle with error handling
+        console.log('[Server] Starting initial data collection (processing queue)...');
+        runDataCollection().catch(error => {
+            console.error('[Server] Error in initial data collection:', error);
+        });
+
+        // Schedule data collection with error handling
+        setInterval(() => {
+            runDataCollection().catch(error => {
+                console.error('[Server] Error in scheduled data collection:', error);
+            });
+        }, 5 * 60 * 1000);
+
+        // Start Express server
+        app.listen(port, () => {
+            console.log(`[Server] Skinport Tracker running on port ${port}`);
+            console.log(`[Server] Data collection queue will be processed every 5 minutes`);
+        });
+
+        // Graceful shutdown handling
+        process.on('SIGINT', async () => {
+            try {
+                console.log('[Server] Shutting down gracefully...');
+                await mongoClient?.close();
+                process.exit(0);
+            } catch (error) {
+                console.error('[Server] Error during shutdown:', error);
+                process.exit(1);
+            }
+        });
+
+    } catch (error) {
+        console.error('[Server] Failed to start server:', error);
+        process.exit(1);
+    }
 }
 
-// Start the server and handle any unhandled rejections
-startServer().catch(console.error);
+// Global error handlers
+process.on('unhandledRejection', (error) => {
+    console.error('[Server] Unhandled rejection:', error);
+});
+
+process.on('uncaughtException', (error) => {
+    console.error('[Server] Uncaught exception:', error);
+    // Attempt graceful shutdown
+    mongoClient?.close().finally(() => process.exit(1));
+});
+
+// Start the server
+startServer();
