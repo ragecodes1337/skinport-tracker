@@ -45,13 +45,28 @@ async function connectToMongoDB() {
     }
 }
 
-// Middleware
 app.use(cors({
-    origin: ['https://skinport.com', 'chrome-extension://*'],
-    credentials: true
+    origin: [
+        'https://skinport.com',
+        'chrome-extension://*',
+        /^chrome-extension:\/\/[a-z0-9-]+$/  // Matches any extension ID
+    ],
+    methods: ['GET', 'POST'],
+    allowedHeaders: ['Content-Type', 'Accept'],
+    credentials: true,
+    maxAge: 86400 // Cache preflight requests for 24 hours
 }));
+
 app.use(express.json());
 
+// Add error handling middleware
+app.use((err, req, res, next) => {
+    console.error('[Server] Error:', err);
+    res.status(500).json({ 
+        error: 'Internal server error', 
+        message: err.message 
+    });
+});
 // Skinport API configuration
 const SKINPORT_API_BASE = 'https://api.skinport.com/v1';
 
