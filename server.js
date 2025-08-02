@@ -13,11 +13,11 @@ const cache = new NodeCache({ stdTTL: 300, checkperiod: 120 });
 // Skinport API Constants
 const SKINPORT_API_URL = 'https://api.skinport.com/v1';
 const APP_ID_CSGO = 730;
-const CURRENCY = 'EUR';
+const SKINPORT_FEE = 0.08; // 8% seller fee
 
 // Rate limiting configuration - Skinport allows 8 requests per 5 minutes
 const RATE_LIMIT_WINDOW = 5 * 60 * 1000; // 5 minutes in milliseconds
-const MAX_REQUESTS_PER_WINDOW = 8;
+const MAX_REQUESTS_PER_WINDOW = 7; // Use 7 to be safe
 const requestQueue = []; // Queue to store timestamps of requests
 
 // Middleware
@@ -26,16 +26,13 @@ app.use(express.json());
 
 /**
  * Delays execution for a given number of milliseconds.
- * @param {number} ms The number of milliseconds to wait.
- * @returns {Promise<void>} A promise that resolves after the delay.
  */
 function delay(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 /**
- * A rate limiter that respects Skinport's 8 requests per 5 minutes limit.
- * It waits if the request queue is full.
+ * Rate limiter that respects Skinport's 8 requests per 5 minutes limit.
  */
 async function waitForRateLimit() {
     const now = Date.now();
@@ -47,9 +44,9 @@ async function waitForRateLimit() {
     if (requestQueue.length >= MAX_REQUESTS_PER_WINDOW) {
         // Queue is full, wait for the oldest request to expire
         const oldestRequestTime = requestQueue[0];
-        const timeToWait = (oldestRequestTime + RATE_LIMIT_WINDOW) - now;
+        const timeToWait = (oldestRequestTime + RATE_LIMIT_WINDOW) - now + 1000; // +1s buffer
         if (timeToWait > 0) {
-            console.log(`[Rate Limiter] Waiting ${timeToWait}ms for the next available slot.`);
+            console.log(`[Rate Limiter] Waiting ${Math.round(timeToWait/1000)}s for the next available slot.`);
             await delay(timeToWait);
         }
     }
@@ -58,10 +55,39 @@ async function waitForRateLimit() {
 }
 
 /**
+ * Creates optimal batches based on URL length limits
+ */
+function createOptimalBatches(uniqueItems, maxUrlLength = 7000) {
+    const batches = [];
+    let currentBatch = [];
+    let currentUrlLength = SKINPORT_API_URL.length + 100; // Base URL + params overhead
+    
+    for (const item of uniqueItems) {
+        const itemLength = encodeURIComponent(item).length + 1; // +1 for comma
+        
+        // If adding this item would exceed URL limit or we hit reasonable batch size
+        if (currentUrlLength + itemLength > maxUrlLength || currentBatch.length >= 100) {
+            if (currentBatch.length > 0) {
+                batches.push([...currentBatch]);
+                currentBatch = [];
+                currentUrlLength = SKINPORT_API_URL.length + 100;
+            }
+        }
+        
+        currentBatch.push(item);
+        currentUrlLength += itemLength;
+    }
+    
+    // Add remaining items
+    if (currentBatch.length > 0) {
+        batches.push(currentBatch);
+    }
+    
+    return batches;
+}
+
+/**
  * Fetches sales history for multiple items in a single API call
- * @param {Array<string>} marketHashNames Array of market hash names
- * @param {string} currency The currency to use
- * @returns {Promise<object>} Object with market_hash_name as keys and sales data as values
  */
 async function fetchSalesHistoryBatch(marketHashNames, currency) {
     const batchKey = `batch_${marketHashNames.sort().join(',')}_${currency}`;
@@ -75,9 +101,7 @@ async function fetchSalesHistoryBatch(marketHashNames, currency) {
     try {
         await waitForRateLimit();
         
-        // Join market hash names with commas for batch request
         const marketHashNamesParam = marketHashNames.join(',');
-        
         const params = new URLSearchParams({
             app_id: APP_ID_CSGO,
             currency: currency,
@@ -126,84 +150,302 @@ async function fetchSalesHistoryBatch(marketHashNames, currency) {
         return {};
     }
 }
+
 /**
- * Calculates the average sales price from the last 7 days of sales.
- * @param {Array<object>} salesHistory The array of sales history data.
- * @returns {number|null} The average price or null if no sales in the last 7 days.
+ * ADVANCED ANALYSIS FUNCTIONS
  */
-function getAverageSalesPrice(salesHistoryData) {
-    // The API returns aggregated data, not individual sales
-    // Use the 7-day average if available
-    if (salesHistoryData.last_7_days && salesHistoryData.last_7_days.avg !== null) {
-        return salesHistoryData.last_7_days.avg;
+
+/**
+ * Analyzes price trends using median prices (more accurate than averages)
+ */
+function analyzePriceTrends(apiData) {
+    const periods = {
+        day1: apiData.last_24_hours,
+        day7: apiData.last_7_days,
+        day30: apiData.last_30_days,
+        day90: apiData.last_90_days
+    };
+    
+    // Use MEDIAN prices for more accurate trend analysis (filters outliers)
+    const prices = [];
+    const timeframes = [];
+    
+    if (periods.day1?.median) {
+        prices.push(periods.day1.median);
+        timeframes.push('24h');
+    }
+    if (periods.day7?.median) {
+        prices.push(periods.day7.median);
+        timeframes.push('7d');
+    }
+    if (periods.day30?.median) {
+        prices.push(periods.day30.median);
+        timeframes.push('30d');
+    }
+    if (periods.day90?.median) {
+        prices.push(periods.day90.median);
+        timeframes.push('90d');
     }
     
-    // Fall back to 30-day average
-    if (salesHistoryData.last_30_days && salesHistoryData.last_30_days.avg !== null) {
-        return salesHistoryData.last_30_days.avg;
+    if (prices.length === 0) return null;
+    
+    // Calculate trend
+    let trend = 'stable';
+    let trendStrength = 0;
+    
+    if (prices.length >= 2) {
+        const recentPrice = prices[0]; // Most recent (24h or 7d)
+        const longerTermPrice = prices[Math.min(2, prices.length - 1)]; // 30d if available
+        const change = ((recentPrice - longerTermPrice) / longerTermPrice) * 100;
+        
+        trendStrength = Math.abs(change);
+        
+        if (change > 5) trend = 'rising';
+        else if (change < -5) trend = 'falling';
+        else trend = 'stable';
     }
     
-    // Fall back to 90-day average
-    if (salesHistoryData.last_90_days && salesHistoryData.last_90_days.avg !== null) {
-        return salesHistoryData.last_90_days.avg;
-    }
+    // Calculate confidence based on data availability and volume
+    let confidence = 0;
+    confidence += prices.length * 20; // 20 per timeframe
     
-    return null;
+    if (periods.day7?.volume > 20) confidence += 20;
+    else if (periods.day7?.volume > 10) confidence += 15;
+    else if (periods.day7?.volume > 5) confidence += 10;
+    
+    if (periods.day30?.volume > 50) confidence += 15;
+    if (periods.day1?.volume > 5) confidence += 15;
+    
+    confidence = Math.min(confidence, 100);
+    
+    return {
+        prices: prices.map((p, i) => ({ period: timeframes[i], price: p })),
+        trend,
+        trendStrength: parseFloat(trendStrength.toFixed(2)),
+        mostRecentPrice: prices[0],
+        confidence
+    };
 }
 
 /**
- * Analyzes a list of items to find profitable deals.
- * @param {Array<object>} items The list of items scraped from Skinport.
- * @param {number} minProfit The minimum profit threshold.
- * @param {number} minProfitMargin The minimum profit margin threshold.
- * @param {string} currency The currency to use.
- * @returns {Promise<Array<object>>} An array of profitable deals.
+ * Assesses item liquidity based on sales frequency
+ */
+function assessLiquidity(apiData) {
+    const sales7d = apiData.last_7_days?.volume || 0;
+    const sales30d = apiData.last_30_days?.volume || 0;
+    const sales90d = apiData.last_90_days?.volume || 0;
+    
+    let liquidityRating;
+    let sellTimeEstimate;
+    
+    if (sales7d >= 50) {
+        liquidityRating = 'EXCELLENT';
+        sellTimeEstimate = 'Few hours to 1 day';
+    } else if (sales7d >= 20) {
+        liquidityRating = 'VERY_GOOD';
+        sellTimeEstimate = '1-2 days';
+    } else if (sales7d >= 10) {
+        liquidityRating = 'GOOD';
+        sellTimeEstimate = '2-4 days';
+    } else if (sales7d >= 5) {
+        liquidityRating = 'MODERATE';
+        sellTimeEstimate = '1-2 weeks';
+    } else if (sales7d >= 2) {
+        liquidityRating = 'POOR';
+        sellTimeEstimate = '2-4 weeks';
+    } else {
+        liquidityRating = 'TERRIBLE';
+        sellTimeEstimate = '1+ months';
+    }
+    
+    // Calculate liquidity score
+    let score = 0;
+    
+    // Primary score from 7-day sales
+    if (sales7d >= 50) score += 60;
+    else if (sales7d >= 20) score += 45;
+    else if (sales7d >= 10) score += 30;
+    else if (sales7d >= 5) score += 15;
+    else if (sales7d >= 2) score += 5;
+    
+    // Consistency bonus
+    if (sales30d > 0) {
+        const consistency = (sales7d * 4.3) / sales30d;
+        if (consistency >= 0.8 && consistency <= 1.2) score += 20;
+        else if (consistency > 1.2) score += 15;
+        else score += 5;
+    }
+    
+    // Volume bonus
+    if (sales90d >= 500) score += 20;
+    else if (sales90d >= 200) score += 15;
+    else if (sales90d >= 100) score += 10;
+    else if (sales90d >= 50) score += 5;
+    
+    score = Math.min(Math.round(score), 100);
+    
+    return {
+        rating: liquidityRating,
+        score,
+        sales7d,
+        sales30d,
+        sales90d,
+        dailyAvg7d: parseFloat((sales7d / 7).toFixed(2)),
+        sellTimeEstimate
+    };
+}
+
+/**
+ * Comprehensive item analysis with realistic profit calculations
+ */
+function analyzeItemOpportunity(currentPrice, apiData, minProfit, minProfitMargin) {
+    const trends = analyzePriceTrends(apiData);
+    const liquidity = assessLiquidity(apiData);
+    
+    if (!trends || !trends.mostRecentPrice) {
+        return null; // Skip items with insufficient data
+    }
+    
+    // Predict realistic selling price based on trends and market conditions
+    let predictedSellingPrice = trends.mostRecentPrice;
+    
+    // Trend adjustments
+    if (trends.trend === 'rising' && trends.confidence > 60) {
+        predictedSellingPrice *= 1.03; // 3% optimism for strong rising trend
+    } else if (trends.trend === 'falling' && trends.confidence > 60) {
+        predictedSellingPrice *= 0.97; // 3% pessimism for strong falling trend
+    }
+    
+    // Liquidity adjustments (poor liquidity = lower selling price)
+    if (liquidity.rating === 'POOR' || liquidity.rating === 'TERRIBLE') {
+        predictedSellingPrice *= 0.95; // 5% discount for poor liquidity
+    }
+    
+    // Calculate realistic profits after fees
+    const netSellingPrice = predictedSellingPrice * (1 - SKINPORT_FEE);
+    const profit = netSellingPrice - currentPrice;
+    const profitMargin = (profit / currentPrice) * 100;
+    
+    // Risk assessment
+    let riskScore = 40; // Base risk
+    
+    // Volatility risk
+    const volatility7d = apiData.last_7_days ? 
+        ((apiData.last_7_days.max - apiData.last_7_days.min) / apiData.last_7_days.median) * 100 : 0;
+    
+    if (volatility7d > 100) riskScore += 25;
+    else if (volatility7d > 50) riskScore += 15;
+    else if (volatility7d > 20) riskScore += 5;
+    
+    // Liquidity risk
+    if (liquidity.rating === 'EXCELLENT' || liquidity.rating === 'VERY_GOOD') riskScore -= 15;
+    else if (liquidity.rating === 'POOR') riskScore += 15;
+    else if (liquidity.rating === 'TERRIBLE') riskScore += 30;
+    
+    // Trend risk
+    if (trends.trend === 'falling' && trends.confidence > 60) riskScore += 20;
+    else if (trends.trend === 'rising' && trends.confidence > 60) riskScore -= 10;
+    
+    // Profit margin risk
+    if (profitMargin > 100) riskScore += 30; // Suspiciously high
+    else if (profitMargin > 50) riskScore += 15;
+    else if (profitMargin < 3) riskScore += 10;
+    
+    riskScore = Math.max(5, Math.min(95, riskScore));
+    
+    // Determine risk level
+    let riskLevel;
+    if (riskScore <= 20) riskLevel = 'LOW';
+    else if (riskScore <= 40) riskLevel = 'MEDIUM';
+    else if (riskScore <= 60) riskLevel = 'HIGH';
+    else riskLevel = 'VERY_HIGH';
+    
+    // Generate recommendation
+    let recommendation;
+    if (profit <= 0) recommendation = 'AVOID - No profit';
+    else if (riskScore > 80) recommendation = 'AVOID - Too risky';
+    else if (liquidity.rating === 'TERRIBLE') recommendation = 'AVOID - Poor liquidity';
+    else if (profitMargin >= 20 && liquidity.score >= 60 && riskScore <= 30) recommendation = 'STRONG BUY';
+    else if (profitMargin >= 15 && liquidity.score >= 45 && riskScore <= 40) recommendation = 'BUY';
+    else if (profitMargin >= 10 && liquidity.score >= 30 && riskScore <= 50) recommendation = 'CONSIDER';
+    else if (profitMargin >= 5 && liquidity.score >= 20 && riskScore <= 60) recommendation = 'WEAK BUY';
+    else recommendation = 'AVOID - Unfavorable risk/reward';
+    
+    // Apply user filters
+    if (profit < minProfit || profitMargin < minProfitMargin) {
+        return null; // Doesn't meet user criteria
+    }
+    
+    return {
+        currentPrice,
+        predictedSellingPrice: parseFloat(predictedSellingPrice.toFixed(2)),
+        netSellingPrice: parseFloat(netSellingPrice.toFixed(2)),
+        profit: parseFloat(profit.toFixed(2)),
+        profitMargin: parseFloat(profitMargin.toFixed(2)),
+        trends,
+        liquidity,
+        riskScore,
+        riskLevel,
+        recommendation,
+        volatility7d: parseFloat(volatility7d.toFixed(2))
+    };
+}
+
+/**
+ * UPDATED MAIN ANALYSIS FUNCTION
  */
 async function analyzePrices(items, minProfit, minProfitMargin, currency) {
     const analyzedItems = [];
     const uniqueItems = [...new Set(items.map(item => item.marketHashName))];
     
-    console.log(`[Analysis] Processing ${uniqueItems.length} unique items in batches...`);
+    console.log(`[Analysis] Processing ${uniqueItems.length} unique items with ADVANCED analysis...`);
     
-    // Process items in batches (let's use smaller batches to be safe)
-    const BATCH_SIZE = 100; // Adjust this based on URL length limits
+    // Create optimal batches
+    const batches = createOptimalBatches(uniqueItems);
     
-    for (let i = 0; i < uniqueItems.length; i += BATCH_SIZE) {
-        const batch = uniqueItems.slice(i, i + BATCH_SIZE);
-        console.log(`[Analysis] Processing batch ${Math.floor(i/BATCH_SIZE) + 1}/${Math.ceil(uniqueItems.length/BATCH_SIZE)} (${batch.length} items)`);
+    if (batches.length > MAX_REQUESTS_PER_WINDOW) {
+        console.warn(`[Analysis] Warning: ${batches.length} batches exceed rate limit of ${MAX_REQUESTS_PER_WINDOW} requests per 5 minutes`);
+        console.warn(`[Analysis] Processing first ${MAX_REQUESTS_PER_WINDOW} batches only`);
+    }
+    
+    const batchesToProcess = batches.slice(0, MAX_REQUESTS_PER_WINDOW);
+    
+    for (let i = 0; i < batchesToProcess.length; i++) {
+        const batch = batchesToProcess[i];
+        console.log(`[Analysis] Processing batch ${i + 1}/${batchesToProcess.length} (${batch.length} items)`);
         
         const batchSalesHistory = await fetchSalesHistoryBatch(batch, currency);
         
         // Process each item in the batch
         for (const marketHashName of batch) {
-            const salesHistoryData = batchSalesHistory[marketHashName];
+            const apiData = batchSalesHistory[marketHashName];
             
-            if (salesHistoryData) {
-                const averageSalesPrice = getAverageSalesPrice(salesHistoryData);
-
-                if (averageSalesPrice) {
-                    const marketItems = items.filter(item => item.marketHashName === marketHashName);
-                    for (const { price, wear } of marketItems) {
-                        const profit = averageSalesPrice - price;
-                        const profitMargin = (profit / price) * 100;
-
-                        if (profit >= minProfit && profitMargin >= minProfitMargin) {
-                            analyzedItems.push({
-                                marketHashName,
-                                price,
-                                wear,
-                                averageSalesPrice,
-                                profit: parseFloat(profit.toFixed(2)),
-                                profitMargin: parseFloat(profitMargin.toFixed(2))
-                            });
-                        }
+            if (apiData) {
+                const marketItems = items.filter(item => item.marketHashName === marketHashName);
+                
+                for (const { price, wear } of marketItems) {
+                    const analysis = analyzeItemOpportunity(price, apiData, minProfit, minProfitMargin);
+                    
+                    if (analysis) {
+                        analyzedItems.push({
+                            marketHashName,
+                            wear,
+                            ...analysis
+                        });
                     }
                 }
             }
         }
     }
     
-    console.log(`[Analysis] Found ${analyzedItems.length} profitable deals`);
+    // Sort by profit margin descending
+    analyzedItems.sort((a, b) => b.profitMargin - a.profitMargin);
+    
+    console.log(`[Analysis] Found ${analyzedItems.length} profitable deals using ADVANCED analysis`);
+    if (analyzedItems.length > 0) {
+        console.log(`[Analysis] Top deal: ${analyzedItems[0].profitMargin.toFixed(2)}% margin (${analyzedItems[0].recommendation})`);
+    }
+    
     return analyzedItems;
 }
 
@@ -214,11 +456,19 @@ app.post('/analyze-prices', async (req, res) => {
         return res.status(400).json({ error: 'Invalid input. Expected an array of items and settings.' });
     }
 
-    console.log(`[Backend] Received ${items.length} items for analysis.`);
+    console.log(`[Backend] Received ${items.length} items for ADVANCED analysis.`);
 
     try {
         const analyzedItems = await analyzePrices(items, settings.minProfit, settings.minProfitMargin, settings.currency);
-        res.json({ analyzedItems });
+        res.json({ 
+            analyzedItems,
+            summary: {
+                totalProcessed: items.length,
+                profitableFound: analyzedItems.length,
+                analysisType: 'ADVANCED',
+                includedFactors: ['price_trends', 'liquidity', 'volatility', 'risk_assessment']
+            }
+        });
     } catch (error) {
         console.error(`[Backend] Failed to analyze prices: ${error}`);
         res.status(500).json({ error: 'Failed to process items.' });
@@ -229,11 +479,17 @@ app.post('/analyze-prices', async (req, res) => {
 app.get('/health', (req, res) => {
     res.json({
         status: 'ok',
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        rateLimit: {
+            requestsInQueue: requestQueue.length,
+            maxRequests: MAX_REQUESTS_PER_WINDOW,
+            windowMinutes: 5
+        }
     });
 });
 
 // Start Express server
 app.listen(port, () => {
-    console.log(`Skinport Tracker API listening on port ${port}`);
+    console.log(`Advanced Skinport Tracker API listening on port ${port}`);
+    console.log(`Using MEDIAN prices and comprehensive risk analysis`);
 });
