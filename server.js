@@ -166,7 +166,7 @@ async function analyzePrices(items, minProfit, minProfitMargin, currency) {
     console.log(`[Analysis] Processing ${uniqueItems.length} unique items in batches...`);
     
     // Process items in batches (let's use smaller batches to be safe)
-    const BATCH_SIZE = 50; // Adjust this based on URL length limits
+    const BATCH_SIZE = 100; // Adjust this based on URL length limits
     
     for (let i = 0; i < uniqueItems.length; i += BATCH_SIZE) {
         const batch = uniqueItems.slice(i, i + BATCH_SIZE);
