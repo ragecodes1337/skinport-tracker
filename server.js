@@ -63,6 +63,7 @@ async function waitForRateLimit() {
  * @param {string} currency The currency to use.
  * @returns {Promise<object|null>} The sales history data or null on error.
  */
+
 async function fetchSalesHistory(marketHashName, currency) {
     const cacheKey = `salesHistory_${marketHashName}_${currency}`;
     const cachedData = cache.get(cacheKey);
@@ -74,20 +75,51 @@ async function fetchSalesHistory(marketHashName, currency) {
 
     try {
         await waitForRateLimit();
-        const response = await fetch(`${SKINPORT_API_URL}/sales/history/${encodeURIComponent(marketHashName)}?app_id=${APP_ID_CSGO}&currency=${currency}`);
+        
+        // FIXED: Use query parameters and required headers
+        const params = new URLSearchParams({
+            app_id: APP_ID_CSGO,
+            currency: currency,
+            market_hash_name: marketHashName
+        });
+        
+        const url = `${SKINPORT_API_URL}/sales/history?${params}`;
+        console.log(`[API Call] Fetching: ${url}`);
+        
+        const response = await fetch(url, {
+            method: 'GET',
+            headers: {
+                'Accept-Encoding': 'br', // REQUIRED by Skinport API
+                'Accept': 'application/json',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+        });
         
         if (!response.ok) {
-            console.error(`[API Error] Failed to fetch sales history for ${marketHashName}. Status: ${response.status}`);
+            console.error(`[API Error] Failed to fetch sales history for ${marketHashName}. Status: ${response.status} ${response.statusText}`);
+            // Log response body for debugging
+            const responseText = await response.text();
+            console.error(`[API Error] Response body: ${responseText.substring(0, 200)}...`);
             return null;
         }
 
         const data = await response.json();
+        
+        // The API returns an array, find the item that matches our market_hash_name
+        const itemData = Array.isArray(data) ? data.find(item => item.market_hash_name === marketHashName) : data;
+        
+        if (!itemData) {
+            console.log(`[API] No sales history found for ${marketHashName}`);
+            return null;
+        }
+        
         // Cache the response
-        cache.set(cacheKey, data);
+        cache.set(cacheKey, itemData);
         console.log(`[Cache] Cache set for ${marketHashName}`);
-        return data;
+        return itemData;
+        
     } catch (error) {
-        console.error(`[Data Fetch] Error fetching sales history for ${marketHashName}: ${error}`);
+        console.error(`[Data Collection] Error fetching sales history for ${marketHashName}: ${error.message}`);
         return null;
     }
 }
@@ -97,16 +129,24 @@ async function fetchSalesHistory(marketHashName, currency) {
  * @param {Array<object>} salesHistory The array of sales history data.
  * @returns {number|null} The average price or null if no sales in the last 7 days.
  */
-function getAverageSalesPrice(salesHistory) {
-    const sevenDaysAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
-    const recentSales = salesHistory.filter(sale => new Date(sale.sold_at * 1000) > sevenDaysAgo);
-
-    if (recentSales.length === 0) {
-        return null;
+function getAverageSalesPrice(salesHistoryData) {
+    // The API returns aggregated data, not individual sales
+    // Use the 7-day average if available
+    if (salesHistoryData.last_7_days && salesHistoryData.last_7_days.avg !== null) {
+        return salesHistoryData.last_7_days.avg;
     }
-
-    const totalSalesPrice = recentSales.reduce((sum, sale) => sum + sale.price, 0);
-    return totalSalesPrice / recentSales.length;
+    
+    // Fall back to 30-day average
+    if (salesHistoryData.last_30_days && salesHistoryData.last_30_days.avg !== null) {
+        return salesHistoryData.last_30_days.avg;
+    }
+    
+    // Fall back to 90-day average
+    if (salesHistoryData.last_90_days && salesHistoryData.last_90_days.avg !== null) {
+        return salesHistoryData.last_90_days.avg;
+    }
+    
+    return null;
 }
 
 /**
