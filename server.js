@@ -58,72 +58,74 @@ async function waitForRateLimit() {
 }
 
 /**
- * Fetches the sales history for an item from the Skinport API.
- * @param {string} marketHashName The market hash name of the item.
- * @param {string} currency The currency to use.
- * @returns {Promise<object|null>} The sales history data or null on error.
+ * Fetches sales history for multiple items in a single API call
+ * @param {Array<string>} marketHashNames Array of market hash names
+ * @param {string} currency The currency to use
+ * @returns {Promise<object>} Object with market_hash_name as keys and sales data as values
  */
-
-async function fetchSalesHistory(marketHashName, currency) {
-    const cacheKey = `salesHistory_${marketHashName}_${currency}`;
-    const cachedData = cache.get(cacheKey);
+async function fetchSalesHistoryBatch(marketHashNames, currency) {
+    const batchKey = `batch_${marketHashNames.sort().join(',')}_${currency}`;
+    const cachedData = cache.get(batchKey);
 
     if (cachedData) {
-        console.log(`[Cache] Cache hit for ${marketHashName}`);
+        console.log(`[Cache] Batch cache hit for ${marketHashNames.length} items`);
         return cachedData;
     }
 
     try {
         await waitForRateLimit();
         
-        // FIXED: Use query parameters and required headers
+        // Join market hash names with commas for batch request
+        const marketHashNamesParam = marketHashNames.join(',');
+        
         const params = new URLSearchParams({
             app_id: APP_ID_CSGO,
             currency: currency,
-            market_hash_name: marketHashName
+            market_hash_name: marketHashNamesParam
         });
         
         const url = `${SKINPORT_API_URL}/sales/history?${params}`;
-        console.log(`[API Call] Fetching: ${url}`);
+        console.log(`[API Call] Fetching batch of ${marketHashNames.length} items`);
         
         const response = await fetch(url, {
             method: 'GET',
             headers: {
-                'Accept-Encoding': 'br', // REQUIRED by Skinport API
+                'Accept-Encoding': 'br',
                 'Accept': 'application/json',
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
         });
         
         if (!response.ok) {
-            console.error(`[API Error] Failed to fetch sales history for ${marketHashName}. Status: ${response.status} ${response.statusText}`);
-            // Log response body for debugging
+            console.error(`[API Error] Failed to fetch batch sales history. Status: ${response.status} ${response.statusText}`);
             const responseText = await response.text();
             console.error(`[API Error] Response body: ${responseText.substring(0, 200)}...`);
-            return null;
+            return {};
         }
 
         const data = await response.json();
         
-        // The API returns an array, find the item that matches our market_hash_name
-        const itemData = Array.isArray(data) ? data.find(item => item.market_hash_name === marketHashName) : data;
-        
-        if (!itemData) {
-            console.log(`[API] No sales history found for ${marketHashName}`);
-            return null;
+        // Convert array response to object with market_hash_name as key
+        const batchData = {};
+        if (Array.isArray(data)) {
+            data.forEach(item => {
+                if (item.market_hash_name) {
+                    batchData[item.market_hash_name] = item;
+                }
+            });
         }
         
-        // Cache the response
-        cache.set(cacheKey, itemData);
-        console.log(`[Cache] Cache set for ${marketHashName}`);
-        return itemData;
+        // Cache the batch response
+        cache.set(batchKey, batchData);
+        console.log(`[Cache] Batch cache set for ${marketHashNames.length} items`);
+        
+        return batchData;
         
     } catch (error) {
-        console.error(`[Data Collection] Error fetching sales history for ${marketHashName}: ${error.message}`);
-        return null;
+        console.error(`[Data Collection] Error fetching batch sales history: ${error.message}`);
+        return {};
     }
 }
-
 /**
  * Calculates the average sales price from the last 7 days of sales.
  * @param {Array<object>} salesHistory The array of sales history data.
@@ -159,13 +161,25 @@ function getAverageSalesPrice(salesHistoryData) {
  */
 async function analyzePrices(items, minProfit, minProfitMargin, currency) {
     const analyzedItems = [];
-    const uniqueItems = new Set(items.map(item => item.marketHashName));
-
-    for (const marketHashName of uniqueItems) {
-        try {
-            const salesHistory = await fetchSalesHistory(marketHashName, currency);
-            if (salesHistory && salesHistory.length > 0) {
-                const averageSalesPrice = getAverageSalesPrice(salesHistory);
+    const uniqueItems = [...new Set(items.map(item => item.marketHashName))];
+    
+    console.log(`[Analysis] Processing ${uniqueItems.length} unique items in batches...`);
+    
+    // Process items in batches (let's use smaller batches to be safe)
+    const BATCH_SIZE = 50; // Adjust this based on URL length limits
+    
+    for (let i = 0; i < uniqueItems.length; i += BATCH_SIZE) {
+        const batch = uniqueItems.slice(i, i + BATCH_SIZE);
+        console.log(`[Analysis] Processing batch ${Math.floor(i/BATCH_SIZE) + 1}/${Math.ceil(uniqueItems.length/BATCH_SIZE)} (${batch.length} items)`);
+        
+        const batchSalesHistory = await fetchSalesHistoryBatch(batch, currency);
+        
+        // Process each item in the batch
+        for (const marketHashName of batch) {
+            const salesHistoryData = batchSalesHistory[marketHashName];
+            
+            if (salesHistoryData) {
+                const averageSalesPrice = getAverageSalesPrice(salesHistoryData);
 
                 if (averageSalesPrice) {
                     const marketItems = items.filter(item => item.marketHashName === marketHashName);
@@ -186,11 +200,10 @@ async function analyzePrices(items, minProfit, minProfitMargin, currency) {
                     }
                 }
             }
-        } catch (error) {
-            console.error(`[Data Collection] Error processing sales history for ${marketHashName}: ${error}`);
         }
     }
     
+    console.log(`[Analysis] Found ${analyzedItems.length} profitable deals`);
     return analyzedItems;
 }
 
