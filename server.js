@@ -15,6 +15,12 @@ const SKINPORT_API_URL = 'https://api.skinport.com/v1';
 const APP_ID_CSGO = 730;
 const SKINPORT_FEE = 0.08; // 8% seller fee
 
+// IMPROVED: More conservative liquidity thresholds for profitable trading
+const MIN_SALES_7D_FOR_CONSIDERATION = 5; // Minimum 5 sales in 7 days
+const MIN_LIQUIDITY_SCORE_FOR_RECOMMENDATION = 30; // Minimum liquidity score
+const MAX_ACCEPTABLE_VOLATILITY = 80; // Maximum 80% volatility for recommendations
+const CONSERVATIVE_PRICE_FACTOR = 0.98; // Apply 2% conservative factor to predicted prices
+
 // Rate limiting configuration - Skinport allows 8 requests per 5 minutes
 const RATE_LIMIT_WINDOW = 5 * 60 * 1000; // 5 minutes in milliseconds
 const MAX_REQUESTS_PER_WINDOW = 7; // Use 7 to be safe
@@ -166,6 +172,11 @@ function analyzePriceTrends(apiData) {
         day90: apiData.last_90_days
     };
     
+    // IMPROVED: Data quality check - need at least 7-day data for reliable analysis
+    if (!periods.day7 || !periods.day7.median || periods.day7.volume < 3) {
+        return null; // Insufficient data quality
+    }
+    
     // Use MEDIAN prices for more accurate trend analysis (filters outliers)
     const prices = [];
     const timeframes = [];
@@ -228,12 +239,15 @@ function analyzePriceTrends(apiData) {
 }
 
 /**
- * Assesses item liquidity based on sales frequency
+ * Assesses item liquidity based on sales frequency - IMPROVED for better filtering
  */
 function assessLiquidity(apiData) {
     const sales7d = apiData.last_7_days?.volume || 0;
     const sales30d = apiData.last_30_days?.volume || 0;
     const sales90d = apiData.last_90_days?.volume || 0;
+    
+    // EARLY FILTER: Immediately flag items that don't meet minimum requirements
+    const meetsMinimumRequirements = sales7d >= MIN_SALES_7D_FOR_CONSIDERATION;
     
     let liquidityRating;
     let sellTimeEstimate;
@@ -291,12 +305,13 @@ function assessLiquidity(apiData) {
         sales30d,
         sales90d,
         dailyAvg7d: parseFloat((sales7d / 7).toFixed(2)),
-        sellTimeEstimate
+        sellTimeEstimate,
+        meetsMinimumRequirements // ADDED: Flag for early filtering
     };
 }
 
 /**
- * Comprehensive item analysis with realistic profit calculations
+ * Comprehensive item analysis with realistic profit calculations - IMPROVED
  */
 function analyzeItemOpportunity(currentPrice, apiData, minProfit, minProfitMargin) {
     const trends = analyzePriceTrends(apiData);
@@ -304,6 +319,18 @@ function analyzeItemOpportunity(currentPrice, apiData, minProfit, minProfitMargi
     
     if (!trends || !trends.mostRecentPrice) {
         return null; // Skip items with insufficient data
+    }
+    
+    // EARLY FILTER: Skip items that don't meet liquidity requirements
+    if (!liquidity.meetsMinimumRequirements) {
+        console.log(`[FILTER] Skipping item due to insufficient liquidity: ${liquidity.sales7d} sales in 7 days`);
+        return null;
+    }
+    
+    // EARLY FILTER: Skip items with terrible liquidity rating
+    if (liquidity.rating === 'TERRIBLE') {
+        console.log(`[FILTER] Skipping item with TERRIBLE liquidity rating`);
+        return null;
     }
     
     // Predict realistic selling price based on trends and market conditions
@@ -316,25 +343,38 @@ function analyzeItemOpportunity(currentPrice, apiData, minProfit, minProfitMargi
         predictedSellingPrice *= 0.97; // 3% pessimism for strong falling trend
     }
     
-    // Liquidity adjustments (poor liquidity = lower selling price)
-    if (liquidity.rating === 'POOR' || liquidity.rating === 'TERRIBLE') {
-        predictedSellingPrice *= 0.95; // 5% discount for poor liquidity
+    // IMPROVED: More conservative liquidity and market adjustments
+    if (liquidity.rating === 'POOR') {
+        predictedSellingPrice *= 0.92; // 8% discount for poor liquidity
+    } else if (liquidity.rating === 'MODERATE') {
+        predictedSellingPrice *= 0.96; // 4% discount for moderate liquidity
     }
     
-    // Calculate realistic profits after fees
-    const netSellingPrice = predictedSellingPrice * (1 - SKINPORT_FEE);
+    // Apply conservative factor for more realistic predictions
+    predictedSellingPrice *= CONSERVATIVE_PRICE_FACTOR;
+    
+    // Calculate realistic profits after fees (IMPROVED: More precise)
+    const grossSellingPrice = predictedSellingPrice;
+    const skinportFee = grossSellingPrice * SKINPORT_FEE;
+    const netSellingPrice = grossSellingPrice - skinportFee;
     const profit = netSellingPrice - currentPrice;
     const profitMargin = (profit / currentPrice) * 100;
     
     // Risk assessment
     let riskScore = 40; // Base risk
     
-    // Volatility risk
+    // IMPROVED: Volatility risk with early filtering
     const volatility7d = apiData.last_7_days ? 
         ((apiData.last_7_days.max - apiData.last_7_days.min) / apiData.last_7_days.median) * 100 : 0;
     
-    if (volatility7d > 100) riskScore += 25;
-    else if (volatility7d > 50) riskScore += 15;
+    // EARLY FILTER: Skip extremely volatile items
+    if (volatility7d > MAX_ACCEPTABLE_VOLATILITY) {
+        console.log(`[FILTER] Skipping item due to high volatility: ${volatility7d.toFixed(2)}%`);
+        return null;
+    }
+    
+    if (volatility7d > 60) riskScore += 25;
+    else if (volatility7d > 40) riskScore += 15;
     else if (volatility7d > 20) riskScore += 5;
     
     // Liquidity risk
@@ -360,15 +400,16 @@ function analyzeItemOpportunity(currentPrice, apiData, minProfit, minProfitMargi
     else if (riskScore <= 60) riskLevel = 'HIGH';
     else riskLevel = 'VERY_HIGH';
     
-    // Generate recommendation
+    // IMPROVED: More conservative recommendation system
     let recommendation;
     if (profit <= 0) recommendation = 'AVOID - No profit';
-    else if (riskScore > 80) recommendation = 'AVOID - Too risky';
-    else if (liquidity.rating === 'TERRIBLE') recommendation = 'AVOID - Poor liquidity';
-    else if (profitMargin >= 20 && liquidity.score >= 60 && riskScore <= 30) recommendation = 'STRONG BUY';
-    else if (profitMargin >= 15 && liquidity.score >= 45 && riskScore <= 40) recommendation = 'BUY';
-    else if (profitMargin >= 10 && liquidity.score >= 30 && riskScore <= 50) recommendation = 'CONSIDER';
-    else if (profitMargin >= 5 && liquidity.score >= 20 && riskScore <= 60) recommendation = 'WEAK BUY';
+    else if (riskScore > 70) recommendation = 'AVOID - Too risky';
+    else if (liquidity.score < MIN_LIQUIDITY_SCORE_FOR_RECOMMENDATION) recommendation = 'AVOID - Poor liquidity';
+    else if (profitMargin > 80) recommendation = 'AVOID - Suspiciously high margin';
+    else if (profitMargin >= 25 && liquidity.score >= 60 && riskScore <= 25) recommendation = 'STRONG BUY';
+    else if (profitMargin >= 18 && liquidity.score >= 45 && riskScore <= 35) recommendation = 'BUY';
+    else if (profitMargin >= 12 && liquidity.score >= 35 && riskScore <= 45) recommendation = 'CONSIDER';
+    else if (profitMargin >= 8 && liquidity.score >= 25 && riskScore <= 55) recommendation = 'WEAK BUY';
     else recommendation = 'AVOID - Unfavorable risk/reward';
     
     // Apply user filters
@@ -379,6 +420,8 @@ function analyzeItemOpportunity(currentPrice, apiData, minProfit, minProfitMargi
     return {
         currentPrice,
         predictedSellingPrice: parseFloat(predictedSellingPrice.toFixed(2)),
+        grossSellingPrice: parseFloat(grossSellingPrice.toFixed(2)), // ADDED: Show gross before fees
+        skinportFee: parseFloat(skinportFee.toFixed(2)), // ADDED: Show exact fee amount
         netSellingPrice: parseFloat(netSellingPrice.toFixed(2)),
         profit: parseFloat(profit.toFixed(2)),
         profitMargin: parseFloat(profitMargin.toFixed(2)),
@@ -398,7 +441,7 @@ async function analyzePrices(items, minProfit, minProfitMargin, currency) {
     const analyzedItems = [];
     const uniqueItems = [...new Set(items.map(item => item.marketHashName))];
     
-    console.log(`[Analysis] Processing ${uniqueItems.length} unique items with ADVANCED analysis...`);
+    console.log(`[Analysis] Processing ${uniqueItems.length} unique items with IMPROVED PROFITABLE analysis...`);
     
     // Create optimal batches
     const batches = createOptimalBatches(uniqueItems);
@@ -441,9 +484,10 @@ async function analyzePrices(items, minProfit, minProfitMargin, currency) {
     // Sort by profit margin descending
     analyzedItems.sort((a, b) => b.profitMargin - a.profitMargin);
     
-    console.log(`[Analysis] Found ${analyzedItems.length} profitable deals using ADVANCED analysis`);
+    console.log(`[Analysis] Found ${analyzedItems.length} HIGH-QUALITY profitable deals with strict filtering`);
     if (analyzedItems.length > 0) {
         console.log(`[Analysis] Top deal: ${analyzedItems[0].profitMargin.toFixed(2)}% margin (${analyzedItems[0].recommendation})`);
+        console.log(`[Analysis] Filtered out items with: terrible liquidity, high volatility (>${MAX_ACCEPTABLE_VOLATILITY}%), insufficient data`);
     }
     
     return analyzedItems;
@@ -465,8 +509,15 @@ app.post('/analyze-prices', async (req, res) => {
             summary: {
                 totalProcessed: items.length,
                 profitableFound: analyzedItems.length,
-                analysisType: 'ADVANCED',
-                includedFactors: ['price_trends', 'liquidity', 'volatility', 'risk_assessment']
+                analysisType: 'IMPROVED_PROFITABLE',
+                includedFactors: ['price_trends', 'liquidity', 'volatility', 'risk_assessment', 'data_quality_filtering'],
+                appliedFilters: {
+                    minSales7d: MIN_SALES_7D_FOR_CONSIDERATION,
+                    minLiquidityScore: MIN_LIQUIDITY_SCORE_FOR_RECOMMENDATION,
+                    maxVolatility: MAX_ACCEPTABLE_VOLATILITY,
+                    conservativeFactor: CONSERVATIVE_PRICE_FACTOR,
+                    skinportFee: SKINPORT_FEE
+                }
             }
         });
     } catch (error) {
