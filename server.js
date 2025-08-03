@@ -348,6 +348,11 @@ app.post('/analyze-prices', async (req, res) => {
                 continue;
             }
 
+            // Debug: Log the actual structure of salesData for first few items
+            if (analyzedItems.length < 3) {
+                console.log(`[Debug] SalesData structure for "${itemName}":`, JSON.stringify(salesData, null, 2));
+            }
+
             // The salesData is the item object, not an array of sales
             // We need to check if it has sales history data
             if (!salesData.sales || !Array.isArray(salesData.sales) || salesData.sales.length === 0) {
