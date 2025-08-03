@@ -62,11 +62,30 @@ function createOptimalBatches(uniqueItems, maxUrlLength = 7000) {
     let currentBatch = [];
     let currentUrlLength = SKINPORT_API_URL.length + 100; // Base URL + params overhead
     
-    for (const item of uniqueItems) {
+    // Helper function to clean and validate item names
+    const cleanItemName = (name) => {
+        // Remove any invalid characters and normalize
+        return name.trim()
+            .replace(/[^\x20-\x7E]/g, '') // Remove non-printable characters
+            .replace(/\s+/g, ' ');        // Normalize spaces
+    };
+
+    // Filter and clean items before batching
+    const validItems = uniqueItems
+        .map(item => cleanItemName(item))
+        .filter(item => {
+            const isValid = item.length > 0 && item.length < 100;
+            if (!isValid) {
+                console.log(`[Batch] Skipping invalid item name: ${item}`);
+            }
+            return isValid;
+        });
+    
+    for (const item of validItems) {
         const itemLength = encodeURIComponent(item).length + 1; // +1 for comma
         
         // If adding this item would exceed URL limit or we hit reasonable batch size
-        if (currentUrlLength + itemLength > maxUrlLength || currentBatch.length >= 200) {
+        if (currentUrlLength + itemLength > maxUrlLength || currentBatch.length >= 100) { // Reduced max batch size
             if (currentBatch.length > 0) {
                 batches.push([...currentBatch]);
                 currentBatch = [];
@@ -90,18 +109,40 @@ function createOptimalBatches(uniqueItems, maxUrlLength = 7000) {
  * Fetches sales history for multiple items in a single API call
  */
 async function fetchSalesHistoryBatch(marketHashNames, currency) {
-    const batchKey = `batch_${marketHashNames.sort().join(',')}_${currency}`;
+    // Validate and clean market hash names
+    const validNames = marketHashNames.filter(name => {
+        const isValid = typeof name === 'string' && 
+                       name.trim().length > 0 && 
+                       name.length < 100 &&
+                       !/[^\x20-\x7E]/.test(name); // Only printable ASCII characters
+        
+        if (!isValid) {
+            console.log(`[API] Skipping invalid market_hash_name: ${name}`);
+        }
+        return isValid;
+    }).map(name => name.trim());
+
+    if (validNames.length === 0) {
+        console.log(`[API] No valid items in batch`);
+        return {};
+    }
+
+    const batchKey = `batch_${validNames.sort().join(',')}_${currency}`;
     const cachedData = cache.get(batchKey);
 
     if (cachedData) {
-        console.log(`[Cache] Batch cache hit for ${marketHashNames.length} items`);
+        console.log(`[Cache] Batch cache hit for ${validNames.length} items`);
         return cachedData;
     }
 
     try {
         await waitForRateLimit();
         
-        const marketHashNamesParam = marketHashNames.join(',');
+        // Properly encode market hash names
+        const marketHashNamesParam = validNames
+            .map(name => encodeURIComponent(name))
+            .join(',');
+            
         const params = new URLSearchParams({
             app_id: APP_ID_CSGO,
             currency: currency,
@@ -109,7 +150,7 @@ async function fetchSalesHistoryBatch(marketHashNames, currency) {
         });
         
         const url = `${SKINPORT_API_URL}/sales/history?${params}`;
-        console.log(`[API Call] Fetching batch of ${marketHashNames.length} items`);
+        console.log(`[API Call] Fetching batch of ${validNames.length} items`);
         
         const response = await fetch(url, {
             method: 'GET',
