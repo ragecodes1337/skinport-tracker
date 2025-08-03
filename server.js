@@ -162,9 +162,32 @@ async function fetchSalesHistoryBatch(marketHashNames, currency) {
         });
         
         if (!response.ok) {
-            console.error(`[API Error] Failed to fetch batch sales history. Status: ${response.status} ${response.statusText}`);
             const responseText = await response.text();
+            console.error(`[API Error] Failed to fetch batch sales history. Status: ${response.status} ${response.statusText}`);
             console.error(`[API Error] Response body: ${responseText.substring(0, 200)}...`);
+            
+            // Add retry logic for 502 errors
+            if (response.status === 502) {
+                console.log('[API Error] Received 502 Bad Gateway, waiting 5 seconds before retry...');
+                await delay(5000); // Wait 5 seconds
+                
+                // Try the request again
+                const retryResponse = await fetch(url, {
+                    method: 'GET',
+                    headers: {
+                        'Accept-Encoding': 'br',
+                        'Accept': 'application/json',
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                    }
+                });
+                
+                if (retryResponse.ok) {
+                    return await retryResponse.json();
+                } else {
+                    console.error('[API Error] Retry also failed');
+                }
+            }
+            
             return {};
         }
 
