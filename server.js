@@ -62,19 +62,18 @@ function createOptimalBatches(uniqueItems, maxUrlLength = 7000) {
     let currentBatch = [];
     let currentUrlLength = SKINPORT_API_URL.length + 100; // Base URL + params overhead
     
-    // Helper function to clean and validate item names
+    // Helper function to clean and validate item names - MUCH MORE PERMISSIVE
     const cleanItemName = (name) => {
-        // Remove any invalid characters and normalize, but preserve StatTrak symbols
+        // Only trim whitespace and normalize spaces - preserve all other characters
         return name.trim()
-            .replace(/[^\x20-\x7E★™]/g, '') // Remove non-printable characters but keep ★ and ™
-            .replace(/\s+/g, ' ');          // Normalize spaces
+            .replace(/\s+/g, ' ');          // Normalize spaces only
     };
 
     // Filter and clean items before batching
     const validItems = uniqueItems
         .map(item => cleanItemName(item))
         .filter(item => {
-            const isValid = item.length > 0 && item.length < 100;
+            const isValid = item.length > 0 && item.length < 150; // Increased limit
             if (!isValid) {
                 console.log(`[Batch] Skipping invalid item name: ${item}`);
             }
@@ -109,12 +108,12 @@ function createOptimalBatches(uniqueItems, maxUrlLength = 7000) {
  * Fetches sales history for multiple items in a single API call
  */
 async function fetchSalesHistoryBatch(marketHashNames, currency) {
-    // Validate and clean market hash names
+    // Validate and clean market hash names - MUCH MORE PERMISSIVE
     const validNames = marketHashNames.filter(name => {
         const isValid = typeof name === 'string' && 
                        name.trim().length > 0 && 
-                       name.length < 100 &&
-                       !/[^\x20-\x7E★™]/.test(name); // Allow printable ASCII characters plus ★ and ™
+                       name.length < 200; // Increased length limit
+                       // REMOVED overly strict character filtering
         
         if (!isValid) {
             console.log(`[API] Skipping invalid market_hash_name: ${name}`);
@@ -381,18 +380,18 @@ app.post('/analyze-prices', async (req, res) => {
             const maxPrice = priceData.max;
             const volume = priceData.volume;
             
-            // Advanced variance and volatility analysis
+            // Advanced variance and volatility analysis (for information only)
             const priceRange = maxPrice - minPrice;
             const coefficientOfVariation = (priceRange / avgPrice) * 100; // CV as percentage
             const priceStability = 100 - Math.min(coefficientOfVariation, 100); // Stability score 0-100
             
             console.log(`[Variance] ${itemName}: CV=${coefficientOfVariation.toFixed(1)}%, Range=${priceRange.toFixed(2)}, Stability=${priceStability.toFixed(1)}%`);
             
-            // Skip items with extreme variance (>50% coefficient of variation)
-            if (coefficientOfVariation > 50) {
-                console.log(`[Variance] Skipping high-variance item: ${itemName} (CV: ${coefficientOfVariation.toFixed(1)}%)`);
-                continue;
-            }
+            // REMOVED - Skip items with extreme variance (this was eliminating too many items)
+            // if (coefficientOfVariation > 50) {
+            //     console.log(`[Variance] Skipping high-variance item: ${itemName} (CV: ${coefficientOfVariation.toFixed(1)}%)`);
+            //     continue;
+            // }
             
             // Calculate weighted pricing across timeframes (prefer recent data)
             let weightedPrice = avgPrice;
@@ -511,10 +510,10 @@ app.post('/analyze-prices', async (req, res) => {
             // RELAXED profit validation - only basic criteria for testing
             const meetsBasicCriteria = profitAmount >= adjustedMinProfit && profitPercentage >= adjustedMinPercentage;
             const meetsConfidenceCriteria = profitConfidence >= 15; // Reduced from 30 to 15
-            const meetsStabilityCriteria = priceStability >= 15; // Reduced from 30 to 15
+            const meetsStabilityCriteria = true; // DISABLED stability requirement - was rejecting too many items
             
             console.log(`[Validation] ${itemName}: Profit=${profitAmount.toFixed(2)}, Percentage=${profitPercentage.toFixed(1)}%, Confidence=${profitConfidence}%, Stability=${priceStability}%`);
-            console.log(`[Validation] Criteria: Basic=${meetsBasicCriteria}, Confidence=${meetsConfidenceCriteria}, Stability=${meetsStabilityCriteria}`);
+            console.log(`[Validation] Criteria: Basic=${meetsBasicCriteria}, Confidence=${meetsConfidenceCriteria}, Stability=${meetsStabilityCriteria} (disabled)`);
             
             if (meetsBasicCriteria && meetsConfidenceCriteria && meetsStabilityCriteria) {
                 analyzedItems.push({
