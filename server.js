@@ -1178,8 +1178,8 @@ app.post('/analyze-prices', async (req, res) => {
             const skinportBuyPrice = typeof itemPrice === 'number' ? itemPrice : parseFloat(itemPrice.toString().replace(',', '.'));
             
             // Float Value Intelligence Analysis
-            const floatAnalysis = analyzeFloatValue(normalizedName, skinportBuyPrice);
-            console.log(`[Float Intelligence] ${normalizedName}: ${floatAnalysis.floatAnalysis}`);
+            const floatAnalysis = analyzeFloatValue(itemName, skinportBuyPrice);
+            console.log(`[Float Intelligence] ${itemName}: ${floatAnalysis.floatAnalysis}`);
             
             // Apply float-adjusted expectations to minimum price
             const floatAdjustedMinPrice = currentMinPrice * floatAnalysis.floatMultiplier;
