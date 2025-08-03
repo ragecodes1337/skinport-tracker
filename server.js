@@ -292,7 +292,7 @@ function analyzePriceTrends(apiData) {
 }
 
 /**
- * Assesses item liquidity based on sales frequency
+ * Assesses item liquidity based on sales frequency - more realistic thresholds
  */
 function assessLiquidity(apiData) {
     const sales7d = apiData.last_7_days?.volume || 0;
@@ -302,33 +302,38 @@ function assessLiquidity(apiData) {
     let liquidityRating;
     let sellTimeEstimate;
     
-    // Simplified liquidity - only GOOD or BAD
+    // More realistic liquidity thresholds
     if (sales7d >= 15) {
         liquidityRating = 'GOOD';
         sellTimeEstimate = '1-3 days';
+    } else if (sales7d >= 8) {
+        liquidityRating = 'MEDIUM';
+        sellTimeEstimate = '3-7 days';
     } else {
         liquidityRating = 'BAD';
         sellTimeEstimate = '1+ weeks';
     }
     
-    // Calculate liquidity score
+    // Calculate liquidity score with more reasonable thresholds
     let score = 0;
     
-    // Simplified scoring - only GOOD or BAD
-    if (sales7d >= 15) score += 80; // GOOD liquidity
-    else score += 10; // BAD liquidity
+    // Base score from weekly sales
+    if (sales7d >= 30) score += 80;
+    else if (sales7d >= 15) score += 60;
+    else if (sales7d >= 8) score += 40;
+    else if (sales7d >= 5) score += 25;
+    else score += 10;
     
     // Consistency bonus
     if (sales30d > 0) {
         const consistency = (sales7d * 4.3) / sales30d;
-        if (consistency >= 0.8 && consistency <= 1.2) score += 20;
-        else if (consistency > 1.2) score += 15;
+        if (consistency >= 0.8 && consistency <= 1.2) score += 15;
+        else if (consistency > 1.2) score += 10;
         else score += 5;
     }
     
-    // Volume bonus
-    if (sales90d >= 500) score += 20;
-    else if (sales90d >= 200) score += 15;
+    // Volume bonus for long-term activity
+    if (sales90d >= 200) score += 15;
     else if (sales90d >= 100) score += 10;
     else if (sales90d >= 50) score += 5;
     
@@ -538,32 +543,35 @@ function analyzeItemOpportunity(currentPrice, apiData, minProfit, minProfitMargi
         recommendationReason.push('Unfavorable risk/reward ratio');
     }
     
-    // Apply user filters with detailed logging
-    console.log(`[Filter] Item analysis: Profit=${profit.toFixed(2)}, Margin=${profitMargin.toFixed(2)}%, Liquidity=${liquidity.rating}, Sales7d=${liquidity.sales7d}`);
-    console.log(`[Filter] User settings: minProfit=${minProfit}, minProfitMargin=${minProfitMargin}, minLiquidity=${settings.minLiquidity}, minSalesVolume=${settings.minSalesVolume}`);
+    // Apply user filters with more lenient approach
+    console.log(`[Filter] Item analysis: Profit=€${profit.toFixed(2)}, Margin=${profitMargin.toFixed(1)}%, Liquidity=${liquidity.rating}, Sales7d=${liquidity.sales7d}`);
+    console.log(`[Filter] User settings: minProfit=€${minProfit}, minProfitMargin=${minProfitMargin}%, minLiquidity=${settings.minLiquidity}, minSalesVolume=${settings.minSalesVolume}`);
     
-    if (profit < minProfit || profitMargin < minProfitMargin) {
-        console.log(`[Filter] REJECTED: Profit/margin too low (Profit: ${profit.toFixed(2)} < ${minProfit}, Margin: ${profitMargin.toFixed(2)}% < ${minProfitMargin}%)`);
-        return null; // Doesn't meet user criteria
+    // More lenient profit filtering - only apply if user settings are stricter than our calculated minimums
+    const calculatedMinProfit = currentPrice < 5 ? 0.50 : currentPrice < 20 ? 1.50 : currentPrice < 100 ? 3.00 : 5.00;
+    const calculatedMinMargin = currentPrice < 5 ? 5 : currentPrice < 20 ? 8 : currentPrice < 100 ? 10 : 12;
+    
+    const actualMinProfit = Math.max(minProfit || 0, calculatedMinProfit);
+    const actualMinMargin = Math.max(minProfitMargin || 0, calculatedMinMargin);
+    
+    if (profit < actualMinProfit || profitMargin < actualMinMargin) {
+        console.log(`[Filter] REJECTED: Profit/margin below threshold (Profit: €${profit.toFixed(2)} < €${actualMinProfit}, Margin: ${profitMargin.toFixed(1)}% < ${actualMinMargin}%)`);
+        return null; // Doesn't meet criteria
     }
     
-    // Additional liquidity filtering
-    if (settings.minLiquidity) {
-        const liquidityRankings = {
-            'VERY_HIGH': 5, 'HIGH': 4, 'MEDIUM': 3, 'LOW': 2, 'VERY_LOW': 1
-        };
-        const itemLiquidityRank = liquidityRankings[liquidity.rating] || 0;
-        const minLiquidityRank = liquidityRankings[settings.minLiquidity] || 0;
-        
-        if (itemLiquidityRank < minLiquidityRank) {
-            console.log(`[Filter] REJECTED: Liquidity too low (${liquidity.rating} < ${settings.minLiquidity})`);
-            return null; // Doesn't meet liquidity requirements
-        }
+    // Much more lenient liquidity filtering - only reject if liquidity is really bad
+    if (settings.minLiquidity && settings.minLiquidity === 'GOOD' && liquidity.rating !== 'GOOD') {
+        console.log(`[Filter] REJECTED: Liquidity requirement not met (${liquidity.rating} < GOOD)`);
+        return null; // Doesn't meet liquidity requirements
     }
     
-    // Sales volume filtering
-    if (liquidity.sales7d < (settings.minSalesVolume || 5)) {
-        console.log(`[Filter] REJECTED: Sales volume too low (${liquidity.sales7d} < ${settings.minSalesVolume})`);
+    // More lenient sales volume filtering
+    const userMinSales = settings.minSalesVolume || 5;
+    const calculatedMinSales = currentPrice < 5 ? 5 : currentPrice < 20 ? 8 : currentPrice < 100 ? 10 : 12;
+    const actualMinSales = Math.max(userMinSales, calculatedMinSales);
+    
+    if (liquidity.sales7d < actualMinSales) {
+        console.log(`[Filter] REJECTED: Sales volume too low (${liquidity.sales7d} < ${actualMinSales})`);
         return null; // Doesn't meet sales volume requirements
     }
     
@@ -666,87 +674,80 @@ function computeAchievablePrice(apiData) {
     };
 }
 
-// Enhanced profit calculation strategy
+// Simplified and more realistic profit calculation strategy
 function calculateEnhancedProfit(currentPrice, apiData, settings = {}) {
     const priceData = computeAchievablePrice(apiData);
     if (!priceData) {
+        console.log(`[Filter] REJECTED: No price data available for €${currentPrice} item`);
         return null;
     }
 
     const { achievablePrice, metrics, factors } = priceData;
     const { vol7, v7, v24 } = metrics;
     
-    // Apply buy slippage and calculate net selling price
-    const buySlippage = 1.003; // 0.3% execution friction
+    // Much more lenient sales volume requirements
+    const minSalesForPrice = currentPrice < 5 ? 5 :    // Very cheap items need 5 sales
+                            currentPrice < 20 ? 8 :    // Low-mid items need 8 sales  
+                            currentPrice < 100 ? 10 :  // Mid items need 10 sales
+                            12;                         // Expensive items need 12 sales
+    
+    if (v7 < minSalesForPrice) {
+        console.log(`[Filter] REJECTED: Insufficient sales volume (${v7} < ${minSalesForPrice}) for €${currentPrice} item`);
+        return null;
+    }
+
+    // Apply realistic costs and fees
+    const buySlippage = 1.002; // 0.2% execution friction (reduced)
     const effectiveCost = currentPrice * buySlippage;
     const netSellingPrice = achievablePrice * 0.92; // After 8% fee
     const profit = netSellingPrice - effectiveCost;
     const profitMargin = (profit / effectiveCost) * 100;
 
-    // Dynamic sales thresholds by price with more lenient requirements
-    const v7req = currentPrice < 5 ? 35 :
-                  currentPrice < 15 ? 20 :
-                  (settings.minSalesVolume || 12);
+    // Much more relaxed profit requirements based on price tiers
+    const minProfitForPrice = currentPrice < 5 ? 0.50 :    // €0.50 for very cheap items
+                             currentPrice < 20 ? 1.50 :    // €1.50 for low-mid items
+                             currentPrice < 100 ? 3.00 :   // €3.00 for mid items  
+                             5.00;                          // €5.00 for expensive items
     
-    if (v7 < v7req) {
-        console.log(`[Filter] REJECTED: Insufficient sales volume (${v7} < ${v7req}) for price €${currentPrice}`);
+    const minMarginForPrice = currentPrice < 5 ? 5 :       // 5% for very cheap items
+                             currentPrice < 20 ? 8 :       // 8% for low-mid items
+                             currentPrice < 100 ? 10 :     // 10% for mid items
+                             12;                            // 12% for expensive items
+
+    // Use user settings if they're lower than our defaults (more permissive)
+    const actualMinProfit = Math.min(settings.minProfit || minProfitForPrice, minProfitForPrice);
+    const actualMinMargin = Math.min(settings.minProfitMargin || minMarginForPrice, minMarginForPrice);
+    
+    if (profit < actualMinProfit || profitMargin < actualMinMargin) {
+        console.log(`[Filter] REJECTED: Profit/margin too low (Profit: €${profit.toFixed(2)} < €${actualMinProfit}, Margin: ${profitMargin.toFixed(1)}% < ${actualMinMargin}%) for €${currentPrice} item`);
         return null;
     }
 
-    // Price band minimum profit requirements
-    const priceBandMin = currentPrice < 10 ? 3 :
-                        currentPrice < 50 ? 5 :
-                        currentPrice < 150 ? 8 : 12;
-    
-    const minMargin = settings.minProfitMargin ?? 15; // Allow 15% margin by default
-    
-    if (profit < Math.max(settings.minProfit ?? 0, priceBandMin) || profitMargin < minMargin) {
-        console.log(`[Filter] REJECTED: Profit/margin too low (Profit: ${profit.toFixed(2)} < ${Math.max(settings.minProfit ?? 0, priceBandMin)}, Margin: ${profitMargin.toFixed(2)}% < ${minMargin}%)`);
+    // Much more lenient volatility check (allow up to 100% volatility)
+    const maxVolatility = 1.0; // 100% volatility allowed
+    if (vol7 > maxVolatility) {
+        console.log(`[Filter] REJECTED: Too volatile (${(vol7*100).toFixed(1)}% > ${maxVolatility*100}%) for €${currentPrice} item`);
         return null;
     }
 
-    // Volatility cap (as fraction, not percent)
-    const maxVol = (settings.maxVolatility ?? 50) / 100;
-    if (vol7 > maxVol) {
-        return null; // Too volatile
-    }
+    // Calculate realistic confidence score
+    let profitConfidence = 40; // Lower base confidence
 
-    // Sales consistency check
-    const sales30d = apiData.last_30_days?.volume || 0;
-    if (sales30d > 0) {
-        const consistency = (v7 * 4.3) / sales30d;
-        if (consistency < 0.6 || consistency > 1.8) {
-            return null; // Inconsistent sales pattern
-        }
-    }
+    // Volume-based confidence (more lenient)
+    if (v7 >= 30) profitConfidence += 25;
+    else if (v7 >= 15) profitConfidence += 15;
+    else if (v7 >= 8) profitConfidence += 10;
 
-    // Strong downtrend check with high confidence
-    if (metrics.m24 && metrics.m7 && v7 >= 15) {
-        const recentTrendChange = (metrics.m24 - metrics.m7) / metrics.m7;
-        if (recentTrendChange <= -0.08) {
-            // Either reject or apply stronger discount
-            if (settings.rejectStrongDowntrends) {
-                return null;
-            }
-            // Already handled in achievable price calculation
-        }
-    }
-
-    // Calculate confidence score
-    let profitConfidence = 50; // Base confidence
-
-    // Volume-based confidence
-    if (v7 >= 40) profitConfidence += 20;
-    else if (v7 >= 15) profitConfidence += 10;
-
-    // Volatility confidence
-    if (vol7 <= 0.2) profitConfidence += 10;
-    else if (vol7 > 0.5) profitConfidence -= 10;
+    // Volatility confidence (more lenient)
+    if (vol7 <= 0.3) profitConfidence += 15;
+    else if (vol7 <= 0.6) profitConfidence += 5;
 
     // Recent activity confidence
-    if (metrics.m24 && v24 >= 10) profitConfidence += 10;
+    if (metrics.m24 && v24 >= 5) profitConfidence += 10;
     
-    profitConfidence = Math.max(0, Math.min(100, profitConfidence));
+    profitConfidence = Math.max(20, Math.min(85, profitConfidence));
+    
+    console.log(`[Filter] ACCEPTED: €${currentPrice} item - Profit: €${profit.toFixed(2)} (${profitMargin.toFixed(1)}%), Sales: ${v7}, Confidence: ${profitConfidence}%`);
     
     return {
         currentPrice,
@@ -757,12 +758,12 @@ function calculateEnhancedProfit(currentPrice, apiData, settings = {}) {
         profitMargin: parseFloat(profitMargin.toFixed(2)),
         profitConfidence,
         feeAmount: parseFloat((achievablePrice * 0.08).toFixed(2)),
-        buySlippage: parseFloat((currentPrice * 0.003).toFixed(2)),
+        buySlippage: parseFloat((currentPrice * 0.002).toFixed(2)),
         metrics: {
             volatility7d: parseFloat(vol7.toFixed(3)),
             sales7d: v7,
             sales24h: v24,
-            consistency: sales30d > 0 ? parseFloat(((v7 * 4.3) / sales30d).toFixed(2)) : null
+            consistency: apiData.last_30_days?.volume > 0 ? parseFloat(((v7 * 4.3) / apiData.last_30_days.volume).toFixed(2)) : null
         },
         factors: priceData.factors,
         baseMedian: priceData.baseMedian
@@ -776,7 +777,9 @@ async function analyzePrices(items, minProfit, minProfitMargin, currency, settin
     const analyzedItems = [];
     const uniqueItems = [...new Set(items.map(item => item.marketHashName))];
     
-    console.log(`[Analysis] Processing ${uniqueItems.length} unique items with ENHANCED analysis...`);
+    console.log(`[Analysis] Processing ${uniqueItems.length} unique items with REALISTIC analysis...`);
+    console.log(`[Analysis] Settings: minProfit=€${minProfit}, minMargin=${minProfitMargin}%, currency=${currency}`);
+    console.log(`[Analysis] First few items:`, items.slice(0, 3).map(item => `${item.marketHashName} €${item.price}`));
     
     // Create optimal batches
     const batches = createOptimalBatches(uniqueItems);
@@ -794,24 +797,34 @@ async function analyzePrices(items, minProfit, minProfitMargin, currency, settin
         
         const batchSalesHistory = await fetchSalesHistoryBatch(batch, currency);
         
+        console.log(`[Analysis] Batch ${i + 1} returned data for ${Object.keys(batchSalesHistory).length} items`);
+        
         // Process each item in the batch
         for (const marketHashName of batch) {
             const apiData = batchSalesHistory[marketHashName];
             
             if (apiData) {
+                console.log(`[Analysis] Processing ${marketHashName}: 7d sales=${apiData.last_7_days?.volume || 0}, 7d median=€${apiData.last_7_days?.median || 'N/A'}`);
+                
                 const marketItems = items.filter(item => item.marketHashName === marketHashName);
                 
                 for (const { price, wear } of marketItems) {
+                    console.log(`[Analysis] Analyzing ${marketHashName} (${wear}) at €${price}`);
                     const analysis = analyzeItemOpportunity(price, apiData, minProfit, minProfitMargin, settings);
                     
                     if (analysis) {
+                        console.log(`[Analysis] ✅ FOUND DEAL: ${marketHashName} - Profit: €${analysis.profit}, Margin: ${analysis.profitMargin}%`);
                         analyzedItems.push({
                             marketHashName,
                             wear,
                             ...analysis
                         });
+                    } else {
+                        console.log(`[Analysis] ❌ Rejected: ${marketHashName} (${wear}) at €${price}`);
                     }
                 }
+            } else {
+                console.log(`[Analysis] No API data for: ${marketHashName}`);
             }
         }
     }
@@ -819,9 +832,9 @@ async function analyzePrices(items, minProfit, minProfitMargin, currency, settin
     // Sort by profit margin descending
     analyzedItems.sort((a, b) => b.profitMargin - a.profitMargin);
     
-    console.log(`[Analysis] Found ${analyzedItems.length} profitable deals using ENHANCED analysis`);
+    console.log(`[Analysis] FINAL RESULT: Found ${analyzedItems.length} profitable deals using REALISTIC analysis`);
     if (analyzedItems.length > 0) {
-        console.log(`[Analysis] Top deal: ${analyzedItems[0].profitMargin.toFixed(2)}% margin (${analyzedItems[0].recommendation})`);
+        console.log(`[Analysis] Top deal: ${analyzedItems[0].marketHashName} - ${analyzedItems[0].profitMargin.toFixed(2)}% margin`);
     }
     
     return analyzedItems;
