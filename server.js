@@ -259,11 +259,11 @@ function analyzeMultiTimeframe(salesData) {
     }
     
     // CRITICAL: Early volatility check using selected timeframe data
-    const salesData = bestTimeframe.data;
-    const salesVolatility = ((salesData.max - salesData.min) / salesData.avg) * 100;
+    const timeframeSalesData = bestTimeframe.data;
+    const timeframeVolatility = ((timeframeSalesData.max - timeframeSalesData.min) / timeframeSalesData.avg) * 100;
     
-    if (salesVolatility > 200) {
-        console.log(`[EARLY VOLATILITY REJECTION] ${salesVolatility.toFixed(1)}% volatility in ${bestTimeframe.period} timeframe - MARKET CHAOS, REJECTED`);
+    if (timeframeVolatility > 200) {
+        console.log(`[EARLY VOLATILITY REJECTION] ${timeframeVolatility.toFixed(1)}% volatility in ${bestTimeframe.period} timeframe - MARKET CHAOS, REJECTED`);
         return null; // Immediately reject extreme volatility items
     }
     
