@@ -310,9 +310,9 @@ function createOptimalBatches(uniqueItems, maxUrlLength = 7000) {
 }
 
 /**
- * Fetches sales history for multiple items in a single API call
+ * Fetches Skinport current market listings for multiple items in a single API call
  */
-async function fetchSalesHistoryBatch(marketHashNames, currency) {
+async function fetchSkinportListingsBatch(marketHashNames, currency) {
     // Validate and clean market hash names - MUCH MORE PERMISSIVE
     const validNames = marketHashNames.filter(name => {
         const isValid = typeof name === 'string' && 
@@ -351,8 +351,8 @@ async function fetchSalesHistoryBatch(marketHashNames, currency) {
             market_hash_name: marketHashNamesParam
         });
         
-        const url = `${SKINPORT_API_URL}/sales/history?${params}`;
-        console.log(`[API Call] Fetching batch of ${validNames.length} items`);
+        const url = `${SKINPORT_API_URL}/items?${params}`;
+        console.log(`[API Call] Fetching Skinport listings for batch of ${validNames.length} items`);
         console.log(`[API Call] Sample names:`, validNames.slice(0, 3));
         console.log(`[API Call] Full URL:`, url.substring(0, 300) + '...');
         
@@ -367,7 +367,7 @@ async function fetchSalesHistoryBatch(marketHashNames, currency) {
         
         if (!response.ok) {
             const responseText = await response.text();
-            console.error(`[API Error] Failed to fetch batch sales history. Status: ${response.status} ${response.statusText}`);
+            console.error(`[API Error] Failed to fetch Skinport listings. Status: ${response.status} ${response.statusText}`);
             console.error(`[API Error] Response body: ${responseText.substring(0, 200)}...`);
             
             // Add retry logic for 502 errors
@@ -403,12 +403,32 @@ async function fetchSalesHistoryBatch(marketHashNames, currency) {
         // Convert array response to object with market_hash_name as key
         const batchData = {};
         if (Array.isArray(data)) {
-            console.log(`[API Response] Processing ${data.length} items from API`);
+            console.log(`[API Response] Processing ${data.length} Skinport listings from API`);
             console.log(`[API Response] First 3 API item names:`, data.slice(0, 3).map(item => item.market_hash_name));
             
             data.forEach(item => {
                 if (item.market_hash_name) {
-                    batchData[item.market_hash_name] = item;
+                    // Process Skinport listing data - find lowest prices
+                    const processedItem = {
+                        market_hash_name: item.market_hash_name,
+                        listings: item.items || [],
+                        lowestPrice: null,
+                        averagePrice: null,
+                        highestPrice: null,
+                        listingCount: 0
+                    };
+                    
+                    if (processedItem.listings && processedItem.listings.length > 0) {
+                        const prices = processedItem.listings.map(listing => listing.price).filter(p => p > 0);
+                        if (prices.length > 0) {
+                            processedItem.lowestPrice = Math.min(...prices);
+                            processedItem.averagePrice = prices.reduce((a, b) => a + b, 0) / prices.length;
+                            processedItem.highestPrice = Math.max(...prices);
+                            processedItem.listingCount = prices.length;
+                        }
+                    }
+                    
+                    batchData[item.market_hash_name] = processedItem;
                 }
             });
             
@@ -458,7 +478,7 @@ async function fetchSalesHistoryBatch(marketHashNames, currency) {
         return batchData;
         
     } catch (error) {
-        console.error(`[Data Collection] Error fetching batch sales history: ${error.message}`);
+        console.error(`[Data Collection] Error fetching Skinport listings: ${error.message}`);
         return {};
     }
 }
@@ -505,12 +525,12 @@ app.post('/analyze-prices', async (req, res) => {
         const batches = createOptimalBatches(uniqueNames);
         console.log(`[Backend] Split into ${batches.length} batches.`);
 
-        // Fetch sales data for all batches
-        const allSalesData = {};
+        // Fetch Skinport listing data for all batches
+        const allListingData = {};
         for (let i = 0; i < batches.length; i++) {
             console.log(`[Backend] Processing batch ${i + 1}/${batches.length} (${batches[i].length} items)`);
-            const batchData = await fetchSalesHistoryBatch(batches[i], settings.currency || 'EUR');
-            Object.assign(allSalesData, batchData);
+            const batchData = await fetchSkinportListingsBatch(batches[i], settings.currency || 'EUR');
+            Object.assign(allListingData, batchData);
             
             // Longer delay between batches to be more conservative with rate limiting
             if (i < batches.length - 1) {
@@ -519,18 +539,18 @@ app.post('/analyze-prices', async (req, res) => {
             }
         }
 
-        console.log(`[Backend] Got sales data for ${Object.keys(allSalesData).length} items.`);
+        console.log(`[Backend] Got Skinport listing data for ${Object.keys(allListingData).length} items.`);
         
-        // Debug which StatTrak items got API data
+        // Debug which StatTrak items got Skinport listing data
         if (statTrakItems.length > 0) {
-            console.log(`[StatTrak Debug] API Response check:`);
+            console.log(`[StatTrak Debug] Skinport Listings Response check:`);
             statTrakItems.slice(0, 3).forEach(item => {
                 const itemName = item.marketHashName || item.name;
-                const hasData = allSalesData[itemName];
+                const hasData = allListingData[itemName];
                 console.log(`  - "${itemName}": ${hasData ? 'HAS DATA' : 'NO DATA'}`);
                 if (!hasData) {
                     // Check if a similar name exists in the response
-                    const similarKeys = Object.keys(allSalesData).filter(key => 
+                    const similarKeys = Object.keys(allListingData).filter(key => 
                         key.toLowerCase().includes(itemName.toLowerCase().replace(/[★™]/g, '').trim())
                     );
                     if (similarKeys.length > 0) {
@@ -547,373 +567,140 @@ app.post('/analyze-prices', async (req, res) => {
             
             if (!itemName || !itemPrice) continue;
 
-            const salesData = allSalesData[itemName];
-            if (!salesData) {
-                console.log(`[Backend] No sales data for: ${itemName}`);
+            const listingData = allListingData[itemName];
+            if (!listingData || !listingData.lowestPrice) {
+                console.log(`[Backend] No Skinport listing data for: ${itemName}`);
                 continue;
             }
 
-            // Debug: Log the actual structure of salesData for first few items
+            // Debug: Log the actual structure of listingData for first few items
             if (analyzedItems.length < 3) {
-                console.log(`[Debug] SalesData structure for "${itemName}":`, JSON.stringify(salesData, null, 2));
+                console.log(`[Debug] ListingData structure for "${itemName}":`, JSON.stringify(listingData, null, 2));
             }
 
-            // The Skinport API returns aggregated data, not individual sales
-            // Use the most recent period with data (prefer 30 days, fallback to 90 days)
-            let priceData = null;
-            if (salesData.last_30_days && salesData.last_30_days.volume > 0 && salesData.last_30_days.avg !== null) {
-                priceData = salesData.last_30_days;
-                console.log(`[Backend] Using 30-day data for: ${itemName}`);
-            } else if (salesData.last_90_days && salesData.last_90_days.volume > 0 && salesData.last_90_days.avg !== null) {
-                priceData = salesData.last_90_days;
-                console.log(`[Backend] Using 90-day data for: ${itemName}`);
-            } else if (salesData.last_7_days && salesData.last_7_days.volume > 0 && salesData.last_7_days.avg !== null) {
-                priceData = salesData.last_7_days;
-                console.log(`[Backend] Using 7-day data for: ${itemName}`);
-            } else if (salesData.last_24_hours && salesData.last_24_hours.volume > 0 && salesData.last_24_hours.avg !== null) {
-                priceData = salesData.last_24_hours;
-                console.log(`[Backend] Using 24-hour data for: ${itemName}`);
-            }
-
-            if (!priceData) {
-                console.log(`[Backend] No usable price data for: ${itemName}`);
+            // Use Skinport listing data for profit analysis
+            const lowestSellPrice = listingData.lowestPrice;
+            const avgSellPrice = listingData.averagePrice;
+            const highestSellPrice = listingData.highestPrice;
+            const listingCount = listingData.listingCount;
+            // Calculate profit potential based on Skinport buy vs sell prices
+            const skinportBuyPrice = typeof itemPrice === 'number' ? itemPrice : parseFloat(itemPrice.toString().replace(',', '.'));
+            
+            // For Skinport flipping, we compare buy price to current sell listings
+            // We need to undercut the lowest listing to sell quickly
+            const competitiveSellPrice = lowestSellPrice * 0.95; // Undercut by 5% for quick sale
+            const conservativeSellPrice = lowestSellPrice * 0.90; // Undercut by 10% for guaranteed sale
+            const aggressiveSellPrice = lowestSellPrice * 0.98; // Undercut by 2% for maximum profit
+            
+            // After Skinport's 8% seller fee
+            const netCompetitivePrice = competitiveSellPrice * 0.92;
+            const netConservativePrice = conservativeSellPrice * 0.92;
+            const netAggressivePrice = aggressiveSellPrice * 0.92;
+            
+            // Calculate profits for different strategies
+            const competitiveProfit = netCompetitivePrice - skinportBuyPrice;
+            const conservativeProfit = netConservativePrice - skinportBuyPrice;
+            const aggressiveProfit = netAggressivePrice - skinportBuyPrice;
+            
+            const competitiveProfitPercentage = (competitiveProfit / skinportBuyPrice) * 100;
+            const conservativeProfitPercentage = (conservativeProfit / skinportBuyPrice) * 100;
+            const aggressiveProfitPercentage = (aggressiveProfit / skinportBuyPrice) * 100;
+            
+            // Advanced variance and volatility analysis based on current listings
+            const priceRange = highestSellPrice - lowestSellPrice;
+            const coefficientOfVariation = (priceRange / avgSellPrice) * 100; // CV as percentage
+            
+            console.log(`[Skinport Analysis] ${itemName}:`);
+            console.log(`  Buy Price: €${skinportBuyPrice.toFixed(2)}`);
+            console.log(`  Sell Range: €${lowestSellPrice.toFixed(2)} - €${highestSellPrice.toFixed(2)} (${listingCount} listings)`);
+            console.log(`  Aggressive (2% undercut): €${aggressiveSellPrice.toFixed(2)} → €${netAggressivePrice.toFixed(2)} net → €${aggressiveProfit.toFixed(2)} profit (${aggressiveProfitPercentage.toFixed(1)}%)`);
+            console.log(`  Competitive (5% undercut): €${competitiveSellPrice.toFixed(2)} → €${netCompetitivePrice.toFixed(2)} net → €${competitiveProfit.toFixed(2)} profit (${competitiveProfitPercentage.toFixed(1)}%)`);
+            console.log(`  Conservative (10% undercut): €${conservativeSellPrice.toFixed(2)} → €${netConservativePrice.toFixed(2)} net → €${conservativeProfit.toFixed(2)} profit (${conservativeProfitPercentage.toFixed(1)}%)`);
+            
+            // Use competitive strategy for main analysis (5% undercut is balanced)
+            const achievablePrice = competitiveSellPrice;
+            const netAchievablePrice = netCompetitivePrice;
+            const profitAmount = competitiveProfit;
+            const profitPercentage = competitiveProfitPercentage;
+            
+            // Skip items with no profit potential
+            if (profitAmount <= 0) {
+                console.log(`[Skinport] ${itemName}: No profit potential - skipping`);
                 continue;
             }
 
-            // Extract price statistics from the aggregated data
-            const avgPrice = priceData.avg;
-            const minPrice = priceData.min;
-            const maxPrice = priceData.max;
-            const volume = priceData.volume;
-            
-            // Advanced variance and volatility analysis (for information only)
-            const priceRange = maxPrice - minPrice;
-            const coefficientOfVariation = (priceRange / avgPrice) * 100; // CV as percentage
-            
-            // WEEKLY FLIP TRADING: Enhanced volatility filtering for 3-7 day holds (RELAXED for more opportunities)
-            let priceStability;
-            
-            // More permissive volatility control - only block extreme outliers
-            const isDangerouslyVolatile = coefficientOfVariation > 400; // Increased from 300 to 400 - only block extreme cases
-            const isHighlyVolatile = coefficientOfVariation > 200; // Increased from 150 to 200
-            
-            // Calculate trend first for stability calculation
-            let trendIndicator = 'STABLE';
-            if (salesData.last_7_days && salesData.last_30_days) {
-                const recent7dAvg = salesData.last_7_days.avg;
-                const older30dAvg = salesData.last_30_days.avg;
-                const trendChange = ((recent7dAvg - older30dAvg) / older30dAvg) * 100;
-                
-                if (trendChange > 10) {
-                    trendIndicator = 'RISING';
-                } else if (trendChange < -10) {
-                    trendIndicator = 'FALLING';
-                }
-                
-                console.log(`[Trend] ${itemName}: ${trendChange.toFixed(1)}% change, trend=${trendIndicator}`);
-            }
-            
-            const trendPenalty = trendIndicator === 'FALLING' ? 25 : trendIndicator === 'RISING' ? -5 : 0;
-            
-            if (isDangerouslyVolatile) {
-                // Give dangerous items a low but non-zero stability score for consideration
-                priceStability = 2;
-                console.log(`[Weekly Flip] ${itemName}: HIGH RISK - Dangerously volatile (CV: ${coefficientOfVariation.toFixed(1)}%) - minimal stability but not auto-rejected`);
-            } else if (avgPrice < 2.0 && volume >= 1000) {
-                // High-volume cases/consumables - acceptable for weekly trading with caution
-                const lenientCV = Math.min(coefficientOfVariation * 0.6, 100);
-                priceStability = Math.max(100 - lenientCV - trendPenalty, 20);
-                console.log(`[Weekly Flip] ${itemName}: High-volume case - moderate risk for weekly holds`);
-            } else if (volume >= 800) {
-                // Very high volume items - more forgiving for weekly trading
-                const adjustedCV = Math.min(coefficientOfVariation * 0.8, 100);
-                priceStability = Math.max(100 - adjustedCV - trendPenalty, 15);
-                console.log(`[Weekly Flip] ${itemName}: High-volume item - acceptable for weekly trading`);
-            } else if (avgPrice < 1.0) {
-                // Other cheap items - more lenient volume requirements
-                if (volume < 20) {
-                    priceStability = 2; // Give low stability instead of 0 for consideration
-                } else {
-                    const adjustedCV = Math.min(coefficientOfVariation * 0.9, 100);
-                    priceStability = Math.max(100 - adjustedCV - trendPenalty, 5); // Minimum 5 instead of 10
-                }
-            } else if (avgPrice < 50.0) {
-                // Mid-range items - balanced requirements for weekly trading
-                if (isHighlyVolatile || volume < 25) {
-                    const strictCV = Math.min(coefficientOfVariation * 1.1, 100);
-                    priceStability = Math.max(100 - strictCV - trendPenalty, 5);
-                } else {
-                    const adjustedCV = Math.min(coefficientOfVariation * 0.95, 100);
-                    priceStability = Math.max(100 - adjustedCV - trendPenalty, 10);
-                }
-            } else {
-                // Expensive items (€50+) - careful but not overly strict for weekly trading
-                if (isHighlyVolatile || volume < 15) {
-                    const strictCV = Math.min(coefficientOfVariation * 1.3, 100);
-                    priceStability = Math.max(100 - strictCV - trendPenalty, 0);
-                } else {
-                    const strictCV = Math.min(coefficientOfVariation * 1.1, 100);
-                    priceStability = Math.max(100 - strictCV - trendPenalty, 8);
-                    
-                    // Moderate penalty for absolute price swings on expensive items
-                    const absoluteSwingPenalty = Math.min((priceRange / avgPrice) * 20, 15);
-                    priceStability = Math.max(priceStability - absoluteSwingPenalty, 0);
-                }
-            }
-            
-            // Ensure stability is never negative
-            priceStability = Math.max(priceStability, 0);
-            
-            console.log(`[Weekly Flip Analysis] ${itemName}: CV=${coefficientOfVariation.toFixed(1)}%, Range=${priceRange.toFixed(2)}, Stability=${priceStability.toFixed(1)}%, AvgPrice=${avgPrice.toFixed(2)}, Volume=${volume}, Strategy=WEEKLY_FLIP`);
-            
-            // Early rejection for weekly flip trading - only extreme volatility cases (RELAXED threshold)
-            if (coefficientOfVariation > 400) {
-                console.log(`[Weekly Flip] ${itemName}: REJECTED - Coefficient of Variation (${coefficientOfVariation.toFixed(1)}%) exceeds 400% threshold for weekly trading`);
-                continue; // Skip to next item
-            }
-            
-            // Calculate weighted pricing across timeframes (prefer recent data)
-            let weightedPrice = avgPrice;
-            let combinedVolume = volume;
-            let dataQuality = 'STANDARD';
-            
-            // Multi-timeframe analysis for better trend detection
-            if (salesData.last_7_days && salesData.last_7_days.volume > 0) {
-                const recent7d = salesData.last_7_days;
-                const recent30d = salesData.last_30_days || priceData;
-                
-                // Weight recent sales more heavily (70% recent, 30% older)
-                if (recent7d.volume >= 3) {
-                    weightedPrice = (recent7d.avg * 0.7) + (recent30d.avg * 0.3);
-                    combinedVolume = recent7d.volume + (recent30d.volume * 0.5);
-                    dataQuality = 'HIGH'; // Recent activity available
-                    console.log(`[Weighted] ${itemName}: 7d=${recent7d.avg.toFixed(2)} (70%) + 30d=${recent30d.avg.toFixed(2)} (30%) = ${weightedPrice.toFixed(2)}`);
-                }
-            }
-            
-            // Conservative percentile-based pricing instead of averages
-            let percentilePrice;
-            if (priceStability > 70) {
-                // High stability: use 40th percentile (more aggressive)
-                percentilePrice = minPrice + (priceRange * 0.40);
-            } else if (priceStability > 50) {
-                // Medium stability: use 30th percentile
-                percentilePrice = minPrice + (priceRange * 0.30);
-            } else {
-                // Low stability: use 25th percentile (very conservative)
-                percentilePrice = minPrice + (priceRange * 0.25);
-            }
-            
-            // Use the lower of weighted average or percentile price for safety
-            const conservativePrice = Math.min(weightedPrice, percentilePrice);
-            
-            console.log(`[Pricing] ${itemName}: Weighted=${weightedPrice.toFixed(2)}, Percentile=${percentilePrice.toFixed(2)}, Conservative=${conservativePrice.toFixed(2)}`);
-            
-            // Enhanced liquidity analysis with INSTANT FLIP focus
-            let achievablePrice;
-            let liquidityRating;
-            let riskLevel;
-            let profitConfidence;
-            
-            // Volume quality assessment - prioritize 24h activity for instant flips
-            const hasRecentActivity = salesData.last_24_hours && salesData.last_24_hours.volume >= 1;
-            const has24hHighActivity = salesData.last_24_hours && salesData.last_24_hours.volume >= 5;
-            const volumeConsistency = has24hHighActivity ? 'EXCELLENT' : hasRecentActivity ? 'GOOD' : 'POOR';
-            
-            // Define dailyVolume for use throughout this section
-            const dailyVolume = salesData.last_24_hours?.volume || 0;
-            
-            // INSTANT FLIP: Volume-first liquidity criteria with 24h activity bonus
-            let isHighVolumeItem = false;
-            let isUltraHighVolumeItem = volume >= 500; // Lower threshold for instant flips
-            let volumeThreshold = {
-                excellent: 10, // New tier for instant flips
-                good: 5,
-                medium: 3, 
-                poor: 1 // Lower barrier for instant consideration
-            };
-            
-            // Handle ultra-high-volume items first (excellent for instant flips)
-            if (isUltraHighVolumeItem && hasRecentActivity) {
-                console.log(`[Instant Liquidity] ${itemName}: Ultra-high-volume with recent activity (${volume} sales, 24h: ${salesData.last_24_hours?.volume || 0})`);
-                if (volume >= 2000 && has24hHighActivity) {
-                    liquidityRating = 'EXCELLENT';
-                    achievablePrice = conservativePrice * 0.99; // Only 1% discount for instant flip
-                    profitConfidence = Math.min(95, 85 + Math.min(volume * 0.001, 10)); 
-                    riskLevel = 'VERY_LOW';
-                } else if (volume >= 1000 && hasRecentActivity) {
-                    liquidityRating = 'EXCELLENT';
-                    achievablePrice = conservativePrice * 0.98; // 2% discount
-                    profitConfidence = Math.min(90, 80 + Math.min(volume * 0.002, 10));
-                    riskLevel = 'LOW';
-                } else if (volume >= 500) {
-                    liquidityRating = 'GOOD';
-                    achievablePrice = conservativePrice * 0.97; // 3% discount
-                    profitConfidence = Math.min(85, 75 + Math.min(volume * 0.005, 10));
-                    riskLevel = priceStability > 20 ? 'LOW' : 'MEDIUM';
-                }
-            } else {
-                // Adjust volume requirements based on 24h activity and total volume
-                
-                // Instant flip scoring: daily activity is CRITICAL
-                if (dailyVolume >= 10 && volume >= 100) {
-                    liquidityRating = 'EXCELLENT';
-                    achievablePrice = conservativePrice * 0.98; // 2% discount for high daily activity
-                    profitConfidence = Math.min(90, 70 + (dailyVolume * 2) + (priceStability * 0.2));
-                    riskLevel = 'VERY_LOW';
-                    isHighVolumeItem = true;
-                } else if (dailyVolume >= 5 && volume >= 50) {
-                    liquidityRating = 'GOOD';
-                    achievablePrice = conservativePrice * 0.96; // 4% discount
-                    profitConfidence = Math.min(85, 60 + (dailyVolume * 3) + (priceStability * 0.3));
-                    riskLevel = 'LOW';
-                    isHighVolumeItem = true;
-                } else if (dailyVolume >= 2 && volume >= 30) {
-                    liquidityRating = 'MEDIUM';
-                    achievablePrice = conservativePrice * 0.94; // 6% discount
-                    profitConfidence = Math.min(75, 45 + (dailyVolume * 5) + (priceStability * 0.3));
-                    riskLevel = 'MEDIUM';
-                } else if (dailyVolume >= 1 && volume >= 20) {
-                    liquidityRating = 'POOR';
-                    achievablePrice = conservativePrice * 0.91; // 9% discount
-                    profitConfidence = Math.min(65, 35 + (dailyVolume * 8) + (priceStability * 0.2));
-                    riskLevel = 'HIGH';
-                } else if (volume >= 100) {
-                    // High total volume but no recent activity - risky for instant flip
-                    liquidityRating = 'POOR';
-                    achievablePrice = conservativePrice * 0.88; // 12% discount
-                    profitConfidence = Math.min(60, 30 + (volume * 0.1) + (priceStability * 0.2));
-                    riskLevel = 'HIGH';
-                } else {
-                    liquidityRating = 'VERY_POOR';
-                    achievablePrice = conservativePrice * 0.85; // 15% discount - not suitable for instant flip
-                    profitConfidence = Math.min(50, 20 + (volume * 0.2) + (priceStability * 0.1));
-                    riskLevel = 'VERY_HIGH';
-                }
-            }
-            
-            console.log(`[Instant Liquidity] ${itemName}: Volume=${volume}, Daily=${dailyVolume}, Rating=${liquidityRating}, Risk=${riskLevel}, Confidence=${profitConfidence.toFixed(0)}%`);
-            
-            // Apply Skinport's 8% seller fee to achievable price
-            const netAchievablePrice = achievablePrice * 0.92; // After 8% fee
-            
-            // Calculate profit based on net achievable price
-            const skinportPriceNum = typeof itemPrice === 'number' ? itemPrice : parseFloat(itemPrice.toString().replace(',', '.'));
-            const profitAmount = netAchievablePrice - skinportPriceNum;
-            const profitPercentage = ((profitAmount / skinportPriceNum) * 100);
-
-            // Enhanced profit validation with risk assessment
+            // Enhanced profit validation - SIMPLIFIED for Skinport-to-Skinport trading
             const minProfitAmount = parseFloat(settings.minProfitAmount || 0);
             const minProfitPercentage = parseFloat(settings.minProfitPercentage || 0);
             
-            // TEMPORARILY DISABLED - Risk-adjusted profit requirements for testing
-            let adjustedMinProfit = minProfitAmount;
-            let adjustedMinPercentage = minProfitPercentage;
+            // Basic criteria: does it meet minimum profit requirements?
+            const meetsBasicCriteria = profitAmount >= minProfitAmount && profitPercentage >= minProfitPercentage;
             
-            // COMMENTED OUT - Increase minimum requirements for high-risk items
-            // if (riskLevel === 'VERY_HIGH') {
-            //     adjustedMinProfit *= 1.5; // Require 50% more profit for very high risk
-            //     adjustedMinPercentage *= 1.3; // Require 30% higher percentage
-            // } else if (riskLevel === 'HIGH') {
-            //     adjustedMinProfit *= 1.25; // Require 25% more profit for high risk
-            //     adjustedMinPercentage *= 1.15; // Require 15% higher percentage
-            // }
+            // Listing quality: how many competing sellers are there?
+            const hasGoodLiquidity = listingCount >= 2 && listingCount <= 20; // Sweet spot: not too few, not too many
+            const liquidityRating = listingCount >= 10 ? 'HIGH' : listingCount >= 5 ? 'MEDIUM' : listingCount >= 2 ? 'LOW' : 'VERY_LOW';
             
-            // Market trend analysis for additional validation (trend already calculated above)
-
-            // WEEKLY FLIP ANALYSIS - 3-7 Day Strategy for Best Accuracy & Sales
-            const weeklyFlipViability = analyzeWeeklyFlipViability(itemName, priceData, salesData, trendIndicator, priceStability);
-            const weeklyFlipStrategy = calculateWeeklyFlipStrategy(skinportPriceNum, priceData, weeklyFlipViability);
+            // Price stability: how spread out are the current listings?
+            const priceStability = listingCount > 1 ? Math.max(0, 100 - coefficientOfVariation) : 50;
+            const isStable = priceStability >= 30; // 30% is reasonable for current market conditions
             
-            // ENHANCED profit validation with WEEKLY FLIP focus (LOWERED criteria to find more opportunities)
-            const meetsBasicCriteria = profitAmount >= adjustedMinProfit && profitPercentage >= adjustedMinPercentage;
-            const meetsConfidenceCriteria = profitConfidence >= 15; // Lowered from 25 to 15 for more opportunities
-            const meetsStabilityCriteria = priceStability >= 3; // Lowered from 8 to 3 for more flexible trading
-            const meetsWeeklyFlipCriteria = weeklyFlipViability.score >= 25; // Lowered from 40 to 25 for broader selection
-            const hasGoodLiquidity = volume >= 15 && weeklyFlipViability.weeklyVolume >= 2; // Lowered volume requirements significantly
+            console.log(`[Validation] ${itemName}: Profit=${profitAmount.toFixed(2)}€ (${profitPercentage.toFixed(1)}%), Listings=${listingCount}, Stability=${priceStability.toFixed(1)}%`);
+            console.log(`[Validation] Criteria: Basic=${meetsBasicCriteria}, Liquidity=${hasGoodLiquidity}, Stable=${isStable}`);
             
-            console.log(`[Validation] ${itemName}: Profit=${profitAmount.toFixed(2)}, Percentage=${profitPercentage.toFixed(1)}%, Confidence=${profitConfidence}%, Stability=${priceStability}%`);
-            console.log(`[Weekly Flip] ${itemName}: Viability=${weeklyFlipViability.recommendation} (${weeklyFlipViability.score}/100), Days=${weeklyFlipViability.estimatedSellDays}`);
-            console.log(`[Validation] Criteria: Basic=${meetsBasicCriteria}, Confidence=${meetsConfidenceCriteria}, Stability=${meetsStabilityCriteria}, WeeklyFlip=${meetsWeeklyFlipCriteria}, GoodLiquidity=${hasGoodLiquidity}`);
-            
-            if (meetsBasicCriteria && meetsConfidenceCriteria && meetsWeeklyFlipCriteria && hasGoodLiquidity) {
+            if (meetsBasicCriteria && hasGoodLiquidity && isStable) {
                 analyzedItems.push({
                     ...item,
                     name: itemName,
                     skinportPrice: itemPrice,
-                    steamAvgPrice: avgPrice.toFixed(2),
-                    steamMinPrice: minPrice.toFixed(2),
-                    steamMaxPrice: maxPrice.toFixed(2),
-                    achievablePrice: netAchievablePrice.toFixed(2), // This is what user will actually get after fees
-                    grossAchievablePrice: achievablePrice.toFixed(2), // Before fees - what to list at
-                    conservativePrice: conservativePrice.toFixed(2), // Conservative estimate before discounts
+                    skinportLowestSell: lowestSellPrice.toFixed(2),
+                    skinportAvgSell: avgSellPrice.toFixed(2),
+                    skinportHighestSell: highestSellPrice.toFixed(2),
+                    achievablePrice: netAchievablePrice.toFixed(2), // What you'll actually get after fees
+                    grossAchievablePrice: achievablePrice.toFixed(2), // What to list at before fees
                     profitAmount: profitAmount.toFixed(2),
                     profitPercentage: profitPercentage.toFixed(1),
-                    salesCount: volume,
-                    dataSource: priceData === salesData.last_24_hours ? '24h' : 
-                               priceData === salesData.last_7_days ? '7d' : 
-                               priceData === salesData.last_30_days ? '30d' : '90d',
-                    lastSaleDate: 'Recent', // Aggregated data doesn't have specific dates
-                    
-                    // Enhanced risk and market analysis
-                    coefficientOfVariation: coefficientOfVariation.toFixed(1),
+                    listingCount: listingCount,
                     priceStability: priceStability.toFixed(1),
-                    trendIndicator: trendIndicator,
-                    volumeConsistency: volumeConsistency,
-                    dataQuality: dataQuality,
+                    liquidityRating: liquidityRating,
                     
-                    // Properties expected by content script
-                    profit: profitAmount,
-                    profitConfidence: Math.round(profitConfidence),
-                    riskLevel: riskLevel,
-                    liquidity: {
-                        rating: liquidityRating,
-                        volume: volume,
-                        consistency: volumeConsistency
-                    },
-                    recommendation: profitPercentage > 25 && liquidityRating === 'GOOD' && riskLevel === 'LOW' ? 'STRONG_BUY' : 
-                                   profitPercentage > 15 && liquidityRating !== 'VERY_POOR' && profitConfidence > 50 ? 'BUY' : 
-                                   profitPercentage > 8 ? 'CONSIDER' :
-                                   profitPercentage < 5 && volume < 2 && priceStability < 10 ? 'AVOID' : 'HOLD',
-                    
-                    // WEEKLY FLIP TRADING SPECIFIC DATA
-                    weeklyFlipTrading: {
-                        viability: weeklyFlipViability.recommendation,
-                        viabilityScore: weeklyFlipViability.score,
-                        reasons: weeklyFlipViability.reasons,
-                        estimatedSellDays: weeklyFlipViability.estimatedSellDays,
-                        targetMarginPercentage: weeklyFlipViability.targetMarginPercentage,
-                        sellProbability: weeklyFlipViability.sellProbability,
-                        hasRecentActivity: weeklyFlipViability.hasRecentActivity,
-                        priceStability: weeklyFlipViability.priceStability,
-                        weeklyVolume: weeklyFlipViability.weeklyVolume
-                    },
-                    weeklyFlipStrategy: {
-                        quickPrice: weeklyFlipStrategy.quick.toFixed(2),
-                        standardPrice: weeklyFlipStrategy.standard.toFixed(2),
-                        patientPrice: weeklyFlipStrategy.patient.toFixed(2),
-                        recommendedPrice: weeklyFlipStrategy.recommended.toFixed(2),
-                        expectedProfit: weeklyFlipStrategy.expectedProfit.toFixed(2),
-                        expectedMargin: weeklyFlipStrategy.expectedMargin.toFixed(1),
-                        expectedDays: weeklyFlipStrategy.expectedDays
+                    // Strategy details
+                    strategies: {
+                        aggressive: {
+                            price: aggressiveSellPrice.toFixed(2),
+                            netPrice: netAggressivePrice.toFixed(2),
+                            profit: aggressiveProfit.toFixed(2),
+                            profitPercent: aggressiveProfitPercentage.toFixed(1)
+                        },
+                        competitive: {
+                            price: competitiveSellPrice.toFixed(2),
+                            netPrice: netCompetitivePrice.toFixed(2),
+                            profit: competitiveProfit.toFixed(2),
+                            profitPercent: competitiveProfitPercentage.toFixed(1)
+                        },
+                        conservative: {
+                            price: conservativeSellPrice.toFixed(2),
+                            netPrice: netConservativePrice.toFixed(2),
+                            profit: conservativeProfit.toFixed(2),
+                            profitPercent: conservativeProfitPercentage.toFixed(1)
+                        }
                     },
                     
-                    // Additional metadata for debugging
-                    analysis: {
-                        originalMinProfit: minProfitAmount,
-                        adjustedMinProfit: adjustedMinProfit.toFixed(2),
-                        originalMinPercentage: minProfitPercentage,
-                        adjustedMinPercentage: adjustedMinPercentage.toFixed(1),
-                        meetsBasicCriteria: meetsBasicCriteria,
-                        meetsConfidenceCriteria: meetsConfidenceCriteria,
-                        meetsStabilityCriteria: meetsStabilityCriteria
-                    }
+                    recommendation: profitPercentage > 20 ? 'STRONG_BUY' : 
+                                   profitPercentage > 10 ? 'BUY' : 
+                                   profitPercentage > 5 ? 'CONSIDER' : 'HOLD'
                 });
                 
                 console.log(`[Enhanced Profit] ${itemName}:`);
                 console.log(`  Profit: €${profitAmount.toFixed(2)} (${profitPercentage.toFixed(1)}%)`);
-                console.log(`  Risk: ${riskLevel}, Confidence: ${profitConfidence.toFixed(0)}%, Stability: ${priceStability.toFixed(1)}%`);
-                console.log(`  Liquidity: ${liquidityRating}, Trend: ${trendIndicator}`);
+                console.log(`  Risk: ${liquidityRating}, Confidence: ${priceStability.toFixed(1)}%, Listings: ${listingCount}`);
+                console.log(`  Liquidity: ${liquidityRating}, Trend: STABLE`);
+            } else if (profitAmount >= -2.0) {
+                // Log items that are close to profitable for debugging
+                console.log(`[Almost Profitable] ${itemName}:`);
+                console.log(`  Buy Price: €${skinportBuyPrice.toFixed(2)}, Lowest Sell: €${lowestSellPrice.toFixed(2)}, After Fees: €${netAchievablePrice.toFixed(2)}`);
+                console.log(`  Profit: €${profitAmount.toFixed(2)} (${profitPercentage.toFixed(1)}%) - Missing profit by €${Math.abs(profitAmount).toFixed(2)}`);
+                console.log(`  Failed criteria: Basic=${meetsBasicCriteria}, Liquidity=${hasGoodLiquidity}, Stable=${isStable}`);
+                console.log(`  This item needs €${Math.abs(profitAmount + 1.0).toFixed(2)} less buy price to be profitable`);
             }
         }
 
@@ -925,7 +712,7 @@ app.post('/analyze-prices', async (req, res) => {
                 totalProcessed: items.length,
                 profitableFound: analyzedItems.length,
                 uniqueItemsChecked: uniqueNames.length,
-                salesDataFound: Object.keys(allSalesData).length,
+                listingDataFound: Object.keys(allListingData).length,
                 batchesProcessed: batches.length
             }
         });
