@@ -381,9 +381,45 @@ app.post('/analyze-prices', async (req, res) => {
             const maxPrice = priceData.max;
             const volume = priceData.volume;
             
-            // Calculate profit
+            // Calculate achievable price based on market conditions and liquidity
+            let achievablePrice;
+            let liquidityRating;
+            let riskLevel;
+            let profitConfidence;
+            
+            // Determine liquidity rating based on volume and timeframe
+            if (volume >= 20) {
+                liquidityRating = 'GOOD';
+                // For high liquidity items, use average price with small discount
+                achievablePrice = avgPrice * 0.98; // 2% discount for quick sale
+                profitConfidence = Math.min(95, 70 + (volume * 1.5));
+                riskLevel = 'LOW';
+            } else if (volume >= 10) {
+                liquidityRating = 'MEDIUM';
+                // For medium liquidity, use average price with medium discount
+                achievablePrice = avgPrice * 0.95; // 5% discount for reasonable sale time
+                profitConfidence = Math.min(85, 50 + (volume * 2));
+                riskLevel = 'MEDIUM';
+            } else if (volume >= 5) {
+                liquidityRating = 'POOR';
+                // For low liquidity, use more conservative pricing
+                achievablePrice = avgPrice * 0.92; // 8% discount for slower sale
+                profitConfidence = Math.min(70, 30 + (volume * 3));
+                riskLevel = 'MEDIUM';
+            } else {
+                liquidityRating = 'VERY_POOR';
+                // For very low liquidity, use very conservative pricing
+                achievablePrice = Math.min(avgPrice * 0.88, minPrice * 0.95); // Use lower of 12% discount or near min price
+                profitConfidence = Math.min(50, 20 + (volume * 4));
+                riskLevel = 'HIGH';
+            }
+            
+            // Apply Skinport's 8% seller fee to achievable price
+            const netAchievablePrice = achievablePrice * 0.92; // After 8% fee
+            
+            // Calculate profit based on net achievable price
             const skinportPriceNum = typeof itemPrice === 'number' ? itemPrice : parseFloat(itemPrice.toString().replace(',', '.'));
-            const profitAmount = avgPrice - skinportPriceNum;
+            const profitAmount = netAchievablePrice - skinportPriceNum;
             const profitPercentage = ((profitAmount / skinportPriceNum) * 100);
 
             // Check if it meets profit criteria
@@ -398,6 +434,8 @@ app.post('/analyze-prices', async (req, res) => {
                     steamAvgPrice: avgPrice.toFixed(2),
                     steamMinPrice: minPrice.toFixed(2),
                     steamMaxPrice: maxPrice.toFixed(2),
+                    achievablePrice: netAchievablePrice.toFixed(2), // This is what user will actually get after fees
+                    grossAchievablePrice: achievablePrice.toFixed(2), // Before fees
                     profitAmount: profitAmount.toFixed(2),
                     profitPercentage: profitPercentage.toFixed(1),
                     salesCount: volume,
@@ -408,17 +446,18 @@ app.post('/analyze-prices', async (req, res) => {
                     
                     // Properties expected by content script
                     profit: profitAmount,
-                    profitConfidence: Math.min(95, 50 + (volume * 2)), // Higher confidence with more volume
-                    riskLevel: volume < 3 ? 'HIGH' : volume < 10 ? 'MEDIUM' : 'LOW',
+                    profitConfidence: profitConfidence,
+                    riskLevel: riskLevel,
                     liquidity: {
-                        rating: volume < 5 ? 'POOR' : volume < 20 ? 'MEDIUM' : 'GOOD',
+                        rating: liquidityRating,
                         volume: volume
                     },
-                    recommendation: profitPercentage > 20 ? 'STRONG_BUY' : 
-                                   profitPercentage > 10 ? 'BUY' : 'CONSIDER'
+                    recommendation: profitPercentage > 20 && liquidityRating !== 'VERY_POOR' ? 'STRONG_BUY' : 
+                                   profitPercentage > 10 && liquidityRating !== 'VERY_POOR' ? 'BUY' : 
+                                   liquidityRating === 'VERY_POOR' ? 'AVOID' : 'CONSIDER'
                 });
                 
-                console.log(`[Profit] Found profitable item: ${itemName} - €${profitAmount.toFixed(2)} (${profitPercentage.toFixed(1)}%)`);
+                console.log(`[Profit] Found profitable item: ${itemName} - €${profitAmount.toFixed(2)} (${profitPercentage.toFixed(1)}%) - Liquidity: ${liquidityRating}`);
             }
         }
 
