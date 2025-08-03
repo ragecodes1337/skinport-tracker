@@ -289,7 +289,7 @@ function createOptimalBatches(uniqueItems, maxUrlLength = 7000) {
         const itemLength = encodeURIComponent(item).length + 1; // +1 for comma
         
         // If adding this item would exceed URL limit or we hit reasonable batch size
-        if (currentUrlLength + itemLength > maxUrlLength || currentBatch.length >= 200) { // Increased from 100 to 200 items per batch
+        if (currentUrlLength + itemLength > maxUrlLength || currentBatch.length >= 50) { // Reduced from 200 to 50 items per batch to prevent URL length issues
             if (currentBatch.length > 0) {
                 batches.push([...currentBatch]);
                 currentBatch = [];
@@ -540,8 +540,8 @@ app.post('/analyze-prices', async (req, res) => {
             
             // Delay between batches for rate limiting
             if (i < batches.length - 1) {
-                console.log(`[Backend] Waiting 3 seconds before next batch...`);
-                await delay(3000);
+                console.log(`[Backend] Waiting 5 seconds before next batch...`);
+                await delay(5000);
             }
         }
 
