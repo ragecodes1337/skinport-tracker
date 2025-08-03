@@ -190,47 +190,56 @@ function analyzeMultiTimeframe(salesData) {
         return null;
     }
     
-    // RECENT-FIRST Selection Logic:
-    // 1. Prefer 24h if volume >= 3 (strong recent activity)
-    // 2. Prefer 7d if volume >= 5 (good weekly pattern)
-    // 3. Use 30d only if recent data insufficient
-    // 4. Avoid 90d for pricing (use only for trend)
+    // REALISTIC TIMEFRAME Selection Logic - Focus on 7d data for better market reality:
+    // 1. Prefer 7d data if volume >= 1 (realistic weekly pattern)
+    // 2. Use 24h if volume >= 3 AND no 7d data (strong daily activity)
+    // 3. Use 30d if volume >= 5 (monthly sample as fallback)
+    // 4. Use 90d as last resort if volume >= 8 (quarterly trend)
     
     let bestTimeframe;
     
-    // First choice: 24h with decent volume
-    const tf24h = timeframes.find(t => t.period === '24h');
-    if (tf24h && tf24h.data.volume >= 3) {
-        bestTimeframe = tf24h;
-        console.log(`[Timeframe Selection] Using 24h data: ${tf24h.data.volume} sales, €${tf24h.data.avg.toFixed(2)} avg - RECENT MARKET REALITY`);
+    // PRIORITY: 7d data with ANY meaningful activity (realistic approach)
+    const tf7d = timeframes.find(t => t.period === '7d');
+    if (tf7d && tf7d.data.volume >= 1) {
+        bestTimeframe = tf7d;
+        console.log(`[Timeframe Selection] Using 7d data: ${tf7d.data.volume} sales, €${tf7d.data.avg.toFixed(2)} avg - WEEKLY REALITY`);
     }
-    // Second choice: 7d with good volume
+    // Second choice: 24h with decent volume (only if no 7d data)
     else {
-        const tf7d = timeframes.find(t => t.period === '7d');
-        if (tf7d && tf7d.data.volume >= 5) {
-            bestTimeframe = tf7d;
-            console.log(`[Timeframe Selection] Using 7d data: ${tf7d.data.volume} sales, €${tf7d.data.avg.toFixed(2)} avg - WEEKLY PATTERN`);
+        const tf24h = timeframes.find(t => t.period === '24h');
+        if (tf24h && tf24h.data.volume >= 3) {
+            bestTimeframe = tf24h;
+            console.log(`[Timeframe Selection] Using 24h data: ${tf24h.data.volume} sales, €${tf24h.data.avg.toFixed(2)} avg - DAILY ACTIVITY`);
         }
-        // Third choice: 7d with any volume (better than 30d/90d)
-        else if (tf7d && tf7d.data.volume >= 2) {
-            bestTimeframe = tf7d;
-            console.log(`[Timeframe Selection] Using 7d data: ${tf7d.data.volume} sales, €${tf7d.data.avg.toFixed(2)} avg - LIMITED WEEKLY DATA`);
-        }
-        // Fallback: 30d only if absolutely necessary
+        // Third choice: 30d with some volume
         else {
             const tf30d = timeframes.find(t => t.period === '30d');
-            if (tf30d && tf30d.data.volume >= 8) {
+            if (tf30d && tf30d.data.volume >= 5) {
                 bestTimeframe = tf30d;
-                console.log(`[Timeframe Selection] Fallback to 30d data: ${tf30d.data.volume} sales, €${tf30d.data.avg.toFixed(2)} avg - MONTHLY FALLBACK`);
+                console.log(`[Timeframe Selection] Using 30d data: ${tf30d.data.volume} sales, €${tf30d.data.avg.toFixed(2)} avg - MONTHLY SAMPLE`);
             }
-            // Last resort: any available data
+            // Fourth choice: 90d with reasonable volume
             else {
-                bestTimeframe = timeframes.reduce((best, current) => {
-                    return current.recency < best.recency ? current : best;
-                });
-                console.log(`[Timeframe Selection] Last resort: ${bestTimeframe.period} data - LIMITED MARKET DATA`);
+                const tf90d = timeframes.find(t => t.period === '90d');
+                if (tf90d && tf90d.data.volume >= 8) {
+                    bestTimeframe = tf90d;
+                    console.log(`[Timeframe Selection] Using 90d data: ${tf90d.data.volume} sales, €${tf90d.data.avg.toFixed(2)} avg - QUARTERLY TREND`);
+                }
+                // Last resort: Best available with WARNING
+                else {
+                    bestTimeframe = timeframes.reduce((best, current) => {
+                        return current.data.volume > best.data.volume ? current : best;
+                    });
+                    console.log(`[TIMEFRAME WARNING] Using ${bestTimeframe.period} data with LOW VOLUME: ${bestTimeframe.data.volume} sales - PROCEED WITH CAUTION`);
+                }
             }
         }
+    }
+    
+    // REALISTIC: Accept items with minimal market data (1+ sales)
+    if (!bestTimeframe || bestTimeframe.data.volume < 1) {
+        console.log(`[INSUFFICIENT DATA REJECTION] Item has ${bestTimeframe?.data.volume || 0} sales in best timeframe - NO MARKET DATA`);
+        return null; // Signal to calling function that this item should be skipped
     }
     
     // Detect price trend using recent vs older data
@@ -291,82 +300,101 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
     const recent7dAvg = multiTimeframeData.allTimeframes.find(t => t.period === '7d')?.data.avg;
     
     // STEP 1: PROFITABILITY-FIRST ANALYSIS - Calculate what we NEED to make profit
-    const weeklyVolume = multiTimeframeData.allTimeframes.find(t => t.period === '7d')?.data.volume || 
-                        Math.max(salesVolume / 4, 1);
+    // FIX: Use ACTUAL 7d volume, fallback to reasonable estimate based on SELECTED timeframe
+    const actual7dVolume = multiTimeframeData.allTimeframes.find(t => t.period === '7d')?.data.volume || 0;
+    let weeklyVolume;
     
-    // Market stability analysis for optimized margins
+    if (actual7dVolume > 0) {
+        weeklyVolume = actual7dVolume;
+    } else if (bestPeriod === '24h') {
+        // Conservative estimate: don't extrapolate 24h to weekly (too unreliable)
+        weeklyVolume = Math.min(salesVolume * 2, salesVolume + 3); // Conservative daily to weekly estimate
+    } else if (bestPeriod === '30d') {
+        weeklyVolume = Math.max(salesVolume / 4, 1); // Monthly to weekly estimate
+    } else if (bestPeriod === '90d') {
+        weeklyVolume = Math.max(salesVolume / 12, 1); // Quarterly to weekly estimate
+    } else {
+        weeklyVolume = Math.max(salesVolume / 4, 1); // Default fallback
+    }
+    
+    console.log(`[Weekly Volume Fix] ${bestPeriod} period with ${salesVolume} sales → estimated weekly: ${weeklyVolume} (actual 7d: ${actual7dVolume})`);
+    
+    // Market stability analysis using SALES DATA volatility (not current listings spread)
     const currentMinPrice_val = marketData.min_price;
     const currentMaxPrice = marketData.max_price;
     const currentMeanPrice = marketData.mean_price;
-    const priceSpread = ((currentMaxPrice - currentMinPrice_val) / currentMeanPrice) * 100;
     
-    // STABLE ITEM DETECTION: Low volatility = reliable quick flips with lower margins
-    const isStableItem = priceSpread <= 15 && weeklyVolume >= 3; // Low volatility + decent volume
+    // CRITICAL FIX: Use sales data volatility for decision making, not current listing spread
+    const salesVolatility = ((salesMax - salesMin) / salesAvg) * 100;
+    const currentListingSpread = ((currentMaxPrice - currentMinPrice_val) / currentMeanPrice) * 100;
+    
+    // STABLE ITEM DETECTION: Use SALES volatility (not current listings) + decent volume
+    const isStableItem = salesVolatility <= 15 && weeklyVolume >= 3; // Low sales volatility + decent volume
     const isHighVelocity = weeklyVolume >= 8; // Fast-moving items
     
     let minProfitMargin;
     let velocityCategory;
     let stabilityBonus = '';
     
-    // OPTIMIZED MARGIN SYSTEM: Stable items get preferential treatment
+    // REALISTIC MARGIN SYSTEM: Practical CS:GO trading margins for actual profitability
     if (isStableItem && isHighVelocity) {
-        // STABLE + HIGH VELOCITY: Premium category - accept lower margins for reliable quick flips
+        // STABLE + HIGH VELOCITY: Premium category - lower margins but reliable
         velocityCategory = 'STABLE_HIGH_VELOCITY';
-        if (buyPrice < 30) {
-            minProfitMargin = 0.08; // 8% for small stable items (was 0.8%)
+        if (buyPrice < 20) {
+            minProfitMargin = 0.03; // 3% for small stable items - realistic
         } else if (buyPrice < 100) {
-            minProfitMargin = 0.10; // 10% for medium stable items (was 1.2%)
+            minProfitMargin = 0.04; // 4% for medium stable items - realistic
         } else {
-            minProfitMargin = 0.12; // 12% for expensive stable items (was 1.5%)
+            minProfitMargin = 0.05; // 5% for expensive stable items - realistic
         }
         stabilityBonus = ' [STABLE+FAST]';
     } else if (isStableItem) {
-        // STABLE MEDIUM VELOCITY: Still good for reliable flips
+        // STABLE MEDIUM VELOCITY: Good for reliable flips
         velocityCategory = 'STABLE_MEDIUM_VELOCITY';
-        if (buyPrice < 50) {
-            minProfitMargin = 0.10; // 10% for small stable items
+        if (buyPrice < 30) {
+            minProfitMargin = 0.035; // 3.5% for small stable items
         } else if (buyPrice < 150) {
-            minProfitMargin = 0.12; // 12% for medium stable items
+            minProfitMargin = 0.045; // 4.5% for medium stable items
         } else {
-            minProfitMargin = 0.10; // 10% for expensive stable items
+            minProfitMargin = 0.04; // 4% for expensive stable items
         }
         stabilityBonus = ' [STABLE]';
-    } else if (weeklyVolume >= 8) {
-        // HIGH VELOCITY but potentially volatile
+    } else if (weeklyVolume >= 5) {
+        // HIGH VELOCITY but potentially volatile - relaxed threshold from 8 to 5
         velocityCategory = 'HIGH_VELOCITY';
-        if (buyPrice < 20) {
-            minProfitMargin = 0.015; // 1.5% for small, fast-moving items
-        } else if (buyPrice < 100) {
-            minProfitMargin = 0.020; // 2.0% for medium, fast-moving items
+        if (buyPrice < 15) {
+            minProfitMargin = 0.025; // 2.5% for small, fast-moving items
+        } else if (buyPrice < 80) {
+            minProfitMargin = 0.03; // 3% for medium, fast-moving items
         } else {
-            minProfitMargin = 0.025; // 2.5% for expensive, fast-moving items
+            minProfitMargin = 0.035; // 3.5% for expensive, fast-moving items
         }
-    } else if (weeklyVolume >= 2) {
-        // MEDIUM VELOCITY
-        velocityCategory = 'MEDIUM_VELOCITY';
-        if (buyPrice < 50) {
-            minProfitMargin = 0.025; // 2.5% for small, medium velocity items
-        } else if (buyPrice < 200) {
-            minProfitMargin = 0.030; // 3.0% for medium, medium velocity items
+    } else if (weeklyVolume >= 1) {
+        // REALISTIC VELOCITY - accepting 1+ sales/week as viable
+        velocityCategory = 'REALISTIC_VELOCITY';
+        if (buyPrice < 25) {
+            minProfitMargin = 0.04; // 4% for small items with some activity
+        } else if (buyPrice < 120) {
+            minProfitMargin = 0.05; // 5% for medium items with some activity
         } else {
-            minProfitMargin = 0.025; // 2.5% for expensive, medium velocity items
+            minProfitMargin = 0.045; // 4.5% for expensive items with some activity
         }
     } else {
-        // LOW VELOCITY - Higher margins needed
-        velocityCategory = 'LOW_VELOCITY';
-        if (buyPrice < 30) {
-            minProfitMargin = 0.040; // 4.0% for small, slow-moving items
-        } else if (buyPrice < 150) {
-            minProfitMargin = 0.050; // 5.0% for medium, slow-moving items
+        // VERY LOW VELOCITY - still worth trying with higher margins
+        velocityCategory = 'LOW_VELOCITY_SPECULATIVE';
+        if (buyPrice < 20) {
+            minProfitMargin = 0.06; // 6% for small, slow-moving items
+        } else if (buyPrice < 100) {
+            minProfitMargin = 0.07; // 7% for medium, slow-moving items
         } else {
-            minProfitMargin = 0.035; // 3.5% for expensive, slow-moving items
+            minProfitMargin = 0.065; // 6.5% for expensive, slow-moving items
         }
     }
     
     // Calculate MINIMUM profitable price (what we MUST get to make profit)
     const minProfitablePrice = buyPrice * (1 + minProfitMargin) / (1 - SKINPORT_FEE);
     
-    console.log(`[Profitability-First] ${buyPrice.toFixed(2)} item: Need €${minProfitablePrice.toFixed(2)} minimum (${(minProfitMargin*100).toFixed(1)}% margin) [${velocityCategory}: ${weeklyVolume} sales/week, ${priceSpread.toFixed(1)}% volatility]${stabilityBonus}`);
+    console.log(`[Profitability-First] ${buyPrice.toFixed(2)} item: Need €${minProfitablePrice.toFixed(2)} minimum (${(minProfitMargin*100).toFixed(1)}% margin) [${velocityCategory}: ${weeklyVolume} sales/week, ${salesVolatility.toFixed(1)}% sales volatility]${stabilityBonus}`);
     
     // STEP 2: MARKET REALITY CHECK - Can the market support our minimum price?
     // SMART SELECTION: Use the lower recent average if 24h is significantly above 7d trend
@@ -388,37 +416,38 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
         selectedPeriod = recent24hAvg ? '24h' : recent7dAvg ? '7d' : bestPeriod;
     }
     
-    // VOLATILITY-BASED MARKET TOLERANCE: Stricter limits for volatile items
-    const salesVolatility = ((salesMax - salesMin) / salesAvg) * 100;
+    // REALISTIC VOLATILITY-BASED MARKET TOLERANCE: Accept real-world CS:GO market conditions
+    // (salesVolatility already calculated above)
     let marketToleranceMultiplier;
     let volatilityCategory;
     
     if (salesVolatility > 200) {
-        // EXTREME VOLATILITY (200%+): Auto-reject or use recent minimum only
-        console.log(`[EXTREME VOLATILITY REJECTION] ${salesVolatility.toFixed(1)}% volatility exceeds 200% limit - TOO RISKY`);
+        // EXTREME VOLATILITY (200%+): Auto-reject - still need some limit
+        console.log(`[EXTREME VOLATILITY REJECTION] ${salesVolatility.toFixed(1)}% volatility exceeds 200% limit - TOO CHAOTIC`);
         return {
             achievablePrice: 0,
             confidence: 'REJECTED',
             strategy: 'EXTREME_VOLATILITY',
             reasoning: `Extreme volatility (${salesVolatility.toFixed(1)}%) - market too unpredictable for safe trading`
         };
-    } else if (salesVolatility > 100) {
-        // VERY HIGH VOLATILITY (100-200%): Use recent minimum + tiny margin only
-        marketToleranceMultiplier = Math.max(salesMin * 1.02 / recentMarketAvg, 1.01); // Max 102% of recent min
-        volatilityCategory = 'VERY_HIGH_VOLATILITY';
-        console.log(`[HIGH VOLATILITY WARNING] ${salesVolatility.toFixed(1)}% volatility - using conservative tolerance`);
-    } else if (salesVolatility > 50) {
-        // HIGH VOLATILITY (50-100%): Stricter tolerance
-        marketToleranceMultiplier = 1.02; // Max 102% of recent average
-        volatilityCategory = 'HIGH_VOLATILITY';
-    } else if (salesVolatility > 20) {
-        // MODERATE VOLATILITY (20-50%): Slightly stricter
-        marketToleranceMultiplier = 1.05; // Max 105% of recent average
+    } else if (salesVolatility > 120) {
+        // HIGH VOLATILITY (120-200%): Accept but be conservative - realistic CS:GO threshold
+        marketToleranceMultiplier = Math.max(salesMin * 1.05 / recentMarketAvg, 1.01); // 105% of recent min
+        volatilityCategory = 'HIGH_VOLATILITY_ACCEPTED';
+        console.log(`[HIGH VOLATILITY ACCEPTED] ${salesVolatility.toFixed(1)}% volatility - using conservative pricing but proceeding`);
+    } else if (salesVolatility > 60) {
+        // MODERATE VOLATILITY (60-120%): Normal CS:GO market conditions
+        marketToleranceMultiplier = 1.08; // 108% of recent average
         volatilityCategory = 'MODERATE_VOLATILITY';
-    } else {
-        // LOW VOLATILITY (≤20%): Standard tolerance
-        marketToleranceMultiplier = 1.08; // Max 108% of recent average
+        console.log(`[MODERATE VOLATILITY] ${salesVolatility.toFixed(1)}% volatility - normal CS:GO market conditions`);
+    } else if (salesVolatility > 25) {
+        // LOW VOLATILITY (25-60%): Good market conditions
+        marketToleranceMultiplier = 1.12; // 112% of recent average
         volatilityCategory = 'LOW_VOLATILITY';
+    } else {
+        // VERY LOW VOLATILITY (≤25%): Stable market - can price higher
+        marketToleranceMultiplier = 1.15; // 115% of recent average
+        volatilityCategory = 'VERY_LOW_VOLATILITY';
     }
     
     const marketTolerance = recentMarketAvg * marketToleranceMultiplier;
@@ -525,7 +554,8 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
             velocityCategory: velocityCategory,
             liquidityMargin: (minProfitMargin * 100).toFixed(1) + '%',
             isStableItem: isStableItem,
-            priceSpread: priceSpread.toFixed(1) + '%',
+            salesVolatility: salesVolatility.toFixed(1) + '%',
+            currentListingSpread: currentListingSpread.toFixed(1) + '%',
             minProfitRequired: minProfitablePrice,
             floatIntelligence: floatAnalysis ? {
                 hasFloat: floatAnalysis.hasFloat,
@@ -595,33 +625,39 @@ function calculateOverallConfidence(marketData, multiTimeframeData, smartPricing
         factors.push('Stable item - profit more reliable');
     }
     
-    // CRITERION 2: LIQUIDITY SCORE (0-100)
+    // CRITERION 2: REALISTIC LIQUIDITY SCORE (0-100) - Practical CS:GO market thresholds
     let liquidityScore = 0;
     
-    // Recent activity is critical for liquidity
+    // Recent activity is important but CS:GO markets are naturally low-volume
     if (!hasRecentActivity) {
-        liquidityScore = 10; // Maximum 10% if no recent sales
-        factors.push('NO recent sales - poor liquidity');
+        liquidityScore = 15; // Still worth considering if no recent sales (was 5%)
+        factors.push('No recent sales - will take longer but still viable');
     } else {
-        // Base liquidity from recent volume
+        // Base liquidity from recent volume - REALISTIC THRESHOLDS for CS:GO
         if (recent24hVolume >= 3) {
-            liquidityScore = 90; // Excellent daily activity
+            liquidityScore = 95; // Excellent daily activity - realistic threshold
             factors.push(`Excellent daily liquidity (${recent24hVolume} sales/24h)`);
+        } else if (recent24hVolume >= 2) {
+            liquidityScore = 85; // Very good daily activity
+            factors.push(`Very good daily liquidity (${recent24hVolume} sales/24h)`);
         } else if (recent24hVolume >= 1) {
-            liquidityScore = 75; // Good daily activity
+            liquidityScore = 70; // Good daily activity
             factors.push(`Good daily liquidity (${recent24hVolume} sales/24h)`);
         } else if (recent7dVolume >= 5) {
-            liquidityScore = 70; // Good weekly activity
+            liquidityScore = 80; // Good weekly activity
             factors.push(`Good weekly liquidity (${recent7dVolume} sales/7d)`);
         } else if (recent7dVolume >= 3) {
-            liquidityScore = 60; // Moderate weekly activity
+            liquidityScore = 65; // Moderate weekly activity - realistic
             factors.push(`Moderate weekly liquidity (${recent7dVolume} sales/7d)`);
+        } else if (recent7dVolume >= 2) {
+            liquidityScore = 50; // Acceptable weekly activity
+            factors.push(`Acceptable weekly liquidity (${recent7dVolume} sales/7d)`);
         } else if (recent7dVolume >= 1) {
-            liquidityScore = 40; // Low weekly activity
-            factors.push(`Low weekly liquidity (${recent7dVolume} sales/7d)`);
+            liquidityScore = 35; // Low but viable weekly activity
+            factors.push(`Low weekly liquidity (${recent7dVolume} sales/7d) - manageable risk`);
         } else {
-            liquidityScore = 20; // Very low activity
-            factors.push('Very low recent liquidity');
+            liquidityScore = 25; // Minimal activity but not hopeless
+            factors.push('Minimal recent liquidity - higher risk but possible');
         }
         
         // Velocity category bonus
@@ -631,66 +667,72 @@ function calculateOverallConfidence(marketData, multiTimeframeData, smartPricing
         } else if (velocityCategory.includes('STABLE')) {
             liquidityScore = Math.min(liquidityScore + 15, 100);
             factors.push('Stable market - predictable liquidity');
+        } else if (velocityCategory.includes('REALISTIC')) {
+            liquidityScore = Math.min(liquidityScore + 8, 100);
+            factors.push('Realistic velocity - normal CS:GO market');
         }
         
         // Market quantity factor (not too many, not too few)
-        if (currentQuantity >= 5 && currentQuantity <= 20) {
+        if (currentQuantity >= 3 && currentQuantity <= 25) {
             liquidityScore = Math.min(liquidityScore + 5, 100);
-            factors.push('Optimal market supply');
-        } else if (currentQuantity > 30) {
-            liquidityScore = Math.max(liquidityScore - 10, 10);
-            factors.push('Oversupplied market - harder to sell');
+            factors.push('Good market supply balance');
+        } else if (currentQuantity > 40) {
+            liquidityScore = Math.max(liquidityScore - 15, 15);
+            factors.push('Oversupplied market - competitive pricing needed');
         } else if (currentQuantity < 2) {
-            liquidityScore = Math.max(liquidityScore - 5, 10);
-            factors.push('Limited market supply');
+            liquidityScore = Math.max(liquidityScore - 8, 15);
+            factors.push('Limited market supply - may take longer');
         }
     }
     
-    // Apply volatility penalty to liquidity score
+    // Apply volatility penalty to liquidity score - REALISTIC PENALTIES for CS:GO
     const salesData = smartPricing.salesData;
     if (salesData) {
         const salesVolatility = ((salesData.max - salesData.min) / salesData.avg) * 100;
-        if (salesVolatility > 100) {
-            liquidityScore = Math.max(liquidityScore - 20, 10);
-            factors.push(`High volatility (${salesVolatility.toFixed(1)}%) - unpredictable liquidity`);
-        } else if (salesVolatility > 50) {
-            liquidityScore = Math.max(liquidityScore - 10, 10);
-            factors.push(`Moderate volatility (${salesVolatility.toFixed(1)}%) - variable liquidity`);
+        if (salesVolatility > 150) {
+            liquidityScore = Math.max(liquidityScore - 25, 15); // Moderate penalty (was -40)
+            factors.push(`High volatility (${salesVolatility.toFixed(1)}%) - timing matters`);
+        } else if (salesVolatility > 80) {
+            liquidityScore = Math.max(liquidityScore - 15, 15); // Light penalty (was -25)
+            factors.push(`Moderate volatility (${salesVolatility.toFixed(1)}%) - some price risk`);
+        } else if (salesVolatility > 40) {
+            liquidityScore = Math.max(liquidityScore - 8, 15); // Very light penalty
+            factors.push(`Low volatility (${salesVolatility.toFixed(1)}%) - stable pricing`);
         }
     }
     
-    // DUAL-CRITERIA COLOR CODING SYSTEM
+    // REALISTIC DUAL-CRITERIA COLOR CODING SYSTEM for practical CS:GO trading
     let confidenceLevel, colorCode, stabilityRating;
     const overallScore = Math.round((profitabilityScore + liquidityScore) / 2);
     
-    // GREEN: Both criteria must be strong (80+ profitability AND 60+ liquidity)
-    if (profitabilityScore >= 80 && liquidityScore >= 60) {
+    // GREEN: Realistic criteria for CS:GO markets (60+ profitability AND 35+ liquidity)
+    if (profitabilityScore >= 60 && liquidityScore >= 35) {
         confidenceLevel = 'HIGH';
         colorCode = 'GREEN';
-        stabilityRating = 'DUAL_CRITERIA_EXCELLENT';
-        factors.push(`GREEN: Both profitable (${profitabilityScore}/100) AND liquid (${liquidityScore}/100)`);
+        stabilityRating = 'PROFITABLE_AND_VIABLE';
+        factors.push(`GREEN: Good profit (${profitabilityScore}/100) AND viable liquidity (${liquidityScore}/100)`);
     }
-    // ORANGE: Either strong profitability OR good liquidity
-    else if (profitabilityScore >= 60 || liquidityScore >= 50) {
+    // ORANGE: Either decent profitability OR acceptable liquidity
+    else if (profitabilityScore >= 40 || liquidityScore >= 25) {
         confidenceLevel = 'MEDIUM';
         colorCode = 'ORANGE';
-        if (profitabilityScore >= 60 && liquidityScore < 50) {
-            stabilityRating = 'PROFITABLE_BUT_ILLIQUID';
-            factors.push(`ORANGE: Good profit (${profitabilityScore}/100) but poor liquidity (${liquidityScore}/100)`);
-        } else if (liquidityScore >= 50 && profitabilityScore < 60) {
+        if (profitabilityScore >= 40 && liquidityScore < 25) {
+            stabilityRating = 'PROFITABLE_BUT_SLOW';
+            factors.push(`ORANGE: Good profit (${profitabilityScore}/100) but slow liquidity (${liquidityScore}/100) - may take longer`);
+        } else if (liquidityScore >= 25 && profitabilityScore < 40) {
             stabilityRating = 'LIQUID_BUT_LOW_PROFIT';
-            factors.push(`ORANGE: Good liquidity (${liquidityScore}/100) but low profit (${profitabilityScore}/100)`);
+            factors.push(`ORANGE: Good liquidity (${liquidityScore}/100) but low profit (${profitabilityScore}/100) - quick but small gains`);
         } else {
             stabilityRating = 'MODERATE_BOTH';
-            factors.push(`ORANGE: Moderate in both criteria - P:${profitabilityScore}/100, L:${liquidityScore}/100`);
+            factors.push(`ORANGE: Moderate overall - P:${profitabilityScore}/100, L:${liquidityScore}/100`);
         }
     }
     // RED: Neither criteria met sufficiently
     else {
         confidenceLevel = 'LOW';
         colorCode = 'RED';
-        stabilityRating = 'HIGH_RISK';
-        factors.push(`RED: Poor profitability (${profitabilityScore}/100) AND liquidity (${liquidityScore}/100)`);
+        stabilityRating = 'SPECULATIVE';
+        factors.push(`RED: Low profitability (${profitabilityScore}/100) AND liquidity (${liquidityScore}/100) - high risk`);
     }
     
     return {
@@ -1301,7 +1343,7 @@ app.post('/analyze-prices', async (req, res) => {
             // Extract sales history data using multi-timeframe analysis
             const multiTimeframeAnalysis = analyzeMultiTimeframe(salesData);
             if (!multiTimeframeAnalysis) {
-                console.log(`[Backend] No usable sales history for: ${itemName}`);
+                console.log(`[Backend] No valid timeframe data for: ${itemName} - insufficient sales volume`);
                 continue;
             }
             
