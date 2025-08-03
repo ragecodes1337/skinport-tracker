@@ -835,7 +835,7 @@ app.post('/analyze-prices', async (req, res) => {
                     steamMinPrice: minPrice.toFixed(2),
                     steamMaxPrice: maxPrice.toFixed(2),
                     achievablePrice: netAchievablePrice.toFixed(2), // This is what user will actually get after fees
-                    grossAchievablePrice: achievablePrice.toFixed(2), // Before fees
+                    grossAchievablePrice: achievablePrice.toFixed(2), // Before fees - what to list at
                     conservativePrice: conservativePrice.toFixed(2), // Conservative estimate before discounts
                     profitAmount: profitAmount.toFixed(2),
                     profitPercentage: profitPercentage.toFixed(1),
