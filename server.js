@@ -43,7 +43,7 @@ function normalizeItemName(name) {
 }
 
 /**
- * Multi-timeframe analysis to find the best data source and detect trends
+ * Multi-timeframe analysis with RECENT-FIRST priority for accurate market pricing
  */
 function analyzeMultiTimeframe(salesData) {
     const timeframes = [];
@@ -53,8 +53,9 @@ function analyzeMultiTimeframe(salesData) {
         timeframes.push({
             period: '24h',
             data: salesData.last_24_hours,
-            weight: 4, // Most recent = highest weight
-            recency: 1
+            weight: 10, // MUCH higher weight for recent data
+            recency: 1,
+            priorityTier: 1 // Highest priority
         });
     }
     
@@ -62,8 +63,9 @@ function analyzeMultiTimeframe(salesData) {
         timeframes.push({
             period: '7d',
             data: salesData.last_7_days,
-            weight: 3,
-            recency: 2
+            weight: 8, // High weight for weekly data
+            recency: 2,
+            priorityTier: 1 // Highest priority
         });
     }
     
@@ -71,8 +73,9 @@ function analyzeMultiTimeframe(salesData) {
         timeframes.push({
             period: '30d',
             data: salesData.last_30_days,
-            weight: 2,
-            recency: 3
+            weight: 4, // Lower weight for monthly
+            recency: 3,
+            priorityTier: 2 // Medium priority - fallback only
         });
     }
     
@@ -80,8 +83,9 @@ function analyzeMultiTimeframe(salesData) {
         timeframes.push({
             period: '90d',
             data: salesData.last_90_days,
-            weight: 1, // Oldest = lowest weight
-            recency: 4
+            weight: 1, // Very low weight for quarterly
+            recency: 4,
+            priorityTier: 3 // Low priority - trend analysis only
         });
     }
     
@@ -89,34 +93,71 @@ function analyzeMultiTimeframe(salesData) {
         return null;
     }
     
-    // Select best timeframe based on volume and recency
-    const bestTimeframe = timeframes.reduce((best, current) => {
-        const currentScore = (current.data.volume * current.weight) + (current.data.volume >= 5 ? 10 : 0);
-        const bestScore = (best.data.volume * best.weight) + (best.data.volume >= 5 ? 10 : 0);
-        return currentScore > bestScore ? current : best;
-    });
+    // RECENT-FIRST Selection Logic:
+    // 1. Prefer 24h if volume >= 3 (strong recent activity)
+    // 2. Prefer 7d if volume >= 5 (good weekly pattern)
+    // 3. Use 30d only if recent data insufficient
+    // 4. Avoid 90d for pricing (use only for trend)
     
-    // Detect price trend across timeframes
-    let trend = 'STABLE';
-    if (timeframes.length >= 2) {
-        const recent = timeframes.find(t => t.recency === 1) || timeframes.find(t => t.recency === 2);
-        const older = timeframes.find(t => t.recency === 3) || timeframes.find(t => t.recency === 4);
-        
-        if (recent && older) {
-            const recentPrice = recent.data.avg;
-            const olderPrice = older.data.avg;
-            const priceChange = ((recentPrice - olderPrice) / olderPrice) * 100;
-            
-            if (priceChange > 10) trend = 'RISING';
-            else if (priceChange < -10) trend = 'FALLING';
+    let bestTimeframe;
+    
+    // First choice: 24h with decent volume
+    const tf24h = timeframes.find(t => t.period === '24h');
+    if (tf24h && tf24h.data.volume >= 3) {
+        bestTimeframe = tf24h;
+        console.log(`[Timeframe Selection] Using 24h data: ${tf24h.data.volume} sales, €${tf24h.data.avg.toFixed(2)} avg - RECENT MARKET REALITY`);
+    }
+    // Second choice: 7d with good volume
+    else {
+        const tf7d = timeframes.find(t => t.period === '7d');
+        if (tf7d && tf7d.data.volume >= 5) {
+            bestTimeframe = tf7d;
+            console.log(`[Timeframe Selection] Using 7d data: ${tf7d.data.volume} sales, €${tf7d.data.avg.toFixed(2)} avg - WEEKLY PATTERN`);
         }
+        // Third choice: 7d with any volume (better than 30d/90d)
+        else if (tf7d && tf7d.data.volume >= 2) {
+            bestTimeframe = tf7d;
+            console.log(`[Timeframe Selection] Using 7d data: ${tf7d.data.volume} sales, €${tf7d.data.avg.toFixed(2)} avg - LIMITED WEEKLY DATA`);
+        }
+        // Fallback: 30d only if absolutely necessary
+        else {
+            const tf30d = timeframes.find(t => t.period === '30d');
+            if (tf30d && tf30d.data.volume >= 8) {
+                bestTimeframe = tf30d;
+                console.log(`[Timeframe Selection] Fallback to 30d data: ${tf30d.data.volume} sales, €${tf30d.data.avg.toFixed(2)} avg - MONTHLY FALLBACK`);
+            }
+            // Last resort: any available data
+            else {
+                bestTimeframe = timeframes.reduce((best, current) => {
+                    return current.recency < best.recency ? current : best;
+                });
+                console.log(`[Timeframe Selection] Last resort: ${bestTimeframe.period} data - LIMITED MARKET DATA`);
+            }
+        }
+    }
+    
+    // Detect price trend using recent vs older data
+    let trend = 'STABLE';
+    const recent24h = timeframes.find(t => t.period === '24h');
+    const recent7d = timeframes.find(t => t.period === '7d');
+    const older30d = timeframes.find(t => t.period === '30d');
+    
+    if (recent24h && recent7d) {
+        const priceChange = ((recent24h.data.avg - recent7d.data.avg) / recent7d.data.avg) * 100;
+        if (priceChange > 8) trend = 'RISING';
+        else if (priceChange < -8) trend = 'FALLING';
+    } else if (recent7d && older30d) {
+        const priceChange = ((recent7d.data.avg - older30d.data.avg) / older30d.data.avg) * 100;
+        if (priceChange > 10) trend = 'RISING';
+        else if (priceChange < -10) trend = 'FALLING';
     }
     
     return {
         bestTimeframe,
         allTimeframes: timeframes,
         trend,
-        confidence: timeframes.length >= 2 ? 'HIGH' : timeframes.length === 1 ? 'MEDIUM' : 'LOW'
+        confidence: timeframes.length >= 2 ? 'HIGH' : timeframes.length === 1 ? 'MEDIUM' : 'LOW',
+        recentDataQuality: recent24h ? 'EXCELLENT' : recent7d ? 'GOOD' : 'LIMITED'
     };
 }
 
@@ -144,29 +185,41 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
     const salesMax = salesData.max;
     const salesVolume = salesData.volume;
     
-    // Check if current listings are realistic compared to sales
-    const listingVsSalesRatio = currentMinPrice / salesAvg;
+    // CRITICAL: Check against RECENT sales averages (24h/7d priority)
+    const recentDataQuality = multiTimeframeData.recentDataQuality;
+    const bestPeriod = multiTimeframeData.bestTimeframe.period;
+    
+    // Get most recent average for reality check
+    const recent24hAvg = multiTimeframeData.allTimeframes.find(t => t.period === '24h')?.data.avg;
+    const recent7dAvg = multiTimeframeData.allTimeframes.find(t => t.period === '7d')?.data.avg;
+    const recentMarketAvg = recent24hAvg || recent7dAvg || salesAvg;
+    
+    console.log(`[Recent Market Check] Using ${recent24hAvg ? '24h' : recent7dAvg ? '7d' : bestPeriod} avg: €${recentMarketAvg.toFixed(2)} vs current min: €${currentMinPrice.toFixed(2)}`);
+    
+    // Check if current listings are realistic compared to RECENT sales
+    const listingVsRecentRatio = currentMinPrice / recentMarketAvg;
     
     let basePrice;
     let strategy;
     let confidence;
     let reasoning;
     
-    if (listingVsSalesRatio > 1.3) {
-        // Current listings are 30%+ above average sales - use sales data
-        basePrice = salesMedian;
-        strategy = 'SALES_BASED';
-        reasoning = 'Current listings overpriced vs actual sales';
-    } else if (listingVsSalesRatio < 0.8) {
-        // Current listings are 20%+ below average sales - use competitive pricing
-        basePrice = currentMinPrice * 0.95;
-        strategy = 'COMPETITIVE';
-        reasoning = 'Current listings below typical sales price';
+    if (listingVsRecentRatio > 1.2) {
+        // Current listings are 20%+ above RECENT sales - use recent sales data
+        basePrice = recentMarketAvg * 0.95; // Price just below recent average
+        strategy = 'RECENT_SALES_BASED';
+        reasoning = `Current listings overpriced vs recent ${recent24hAvg ? '24h' : '7d'} avg (€${recentMarketAvg.toFixed(2)})`;
+    } else if (listingVsRecentRatio < 0.85) {
+        // Current listings are 15%+ below recent sales - competitive opportunity
+        basePrice = Math.min(currentMinPrice * 0.95, recentMarketAvg * 0.98);
+        strategy = 'COMPETITIVE_OPPORTUNITY';
+        reasoning = 'Current listings below recent market average - opportunity';
     } else {
-        // Listings and sales are aligned - use hybrid approach
-        basePrice = (salesMedian * 0.6) + (currentMinPrice * 0.95 * 0.4);
-        strategy = 'HYBRID';
-        reasoning = 'Balanced between sales data and current competition';
+        // Listings aligned with recent sales - hybrid approach favoring recent data
+        const recentWeight = recentDataQuality === 'EXCELLENT' ? 0.8 : 0.7;
+        basePrice = (recentMarketAvg * recentWeight) + (currentMinPrice * 0.95 * (1 - recentWeight));
+        strategy = 'RECENT_HYBRID';
+        reasoning = `Balanced pricing based on recent ${bestPeriod} data`;
     }
     
     // Adjust for trend
@@ -191,17 +244,16 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
         basePrice *= 0.99; // Minimal penalty from 0.97 (was 3% penalty, now 1%)
     }
     
-    // MARKET REALITY CHECK FIRST - Don't force profit where market won't support it
-    const salesAvgPrice = salesData.avg;
-    const marketTolerancePrice = salesAvgPrice * 1.10; // Max 110% of recent sales average
+    // RECENT MARKET REALITY CHECK - Don't force profit where recent market won't support it
+    const recentMarketTolerance = recentMarketAvg * 1.08; // Max 108% of recent sales average (tighter than old 110%)
     
-    if (basePrice > marketTolerancePrice) {
-        console.log(`[Market Reality] ${buyPrice.toFixed(2)} item: basePrice €${basePrice.toFixed(2)} exceeds market tolerance €${marketTolerancePrice.toFixed(2)} (110% of €${salesAvgPrice.toFixed(2)} avg) - REJECTING`);
+    if (basePrice > recentMarketTolerance) {
+        console.log(`[Recent Market Reality] ${buyPrice.toFixed(2)} item: basePrice €${basePrice.toFixed(2)} exceeds recent market tolerance €${recentMarketTolerance.toFixed(2)} (108% of €${recentMarketAvg.toFixed(2)} recent avg) - REJECTING`);
         return {
             achievablePrice: 0, // Signal rejection
             confidence: 'REJECTED',
-            strategy: 'MARKET_REJECTED',
-            reasoning: `Price €${basePrice.toFixed(2)} exceeds market reality (110% of €${salesAvgPrice.toFixed(2)} avg sales)`
+            strategy: 'RECENT_MARKET_REJECTED',
+            reasoning: `Price €${basePrice.toFixed(2)} exceeds recent market reality (108% of €${recentMarketAvg.toFixed(2)} ${recent24hAvg ? '24h' : '7d'} avg)`
         };
     }
     
@@ -253,14 +305,14 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
     if (basePrice < minProfitablePrice) {
         const adjustedPrice = minProfitablePrice;
         
-        // But still respect market reality - if even minimum profit exceeds market tolerance, reject
-        if (adjustedPrice > marketTolerancePrice) {
-            console.log(`[Market Reality] ${buyPrice.toFixed(2)} item: Even minimum profit €${adjustedPrice.toFixed(2)} exceeds market tolerance €${marketTolerancePrice.toFixed(2)} - REJECTING`);
+        // But still respect RECENT market reality - if even minimum profit exceeds recent tolerance, reject
+        if (adjustedPrice > recentMarketTolerance) {
+            console.log(`[Recent Market Reality] ${buyPrice.toFixed(2)} item: Even minimum profit €${adjustedPrice.toFixed(2)} exceeds recent market tolerance €${recentMarketTolerance.toFixed(2)} - REJECTING`);
             return {
                 achievablePrice: 0, // Signal rejection
                 confidence: 'REJECTED',
                 strategy: 'PROFIT_IMPOSSIBLE',
-                reasoning: `Even ${(minProfitMargin*100).toFixed(1)}% margin (€${adjustedPrice.toFixed(2)}) exceeds market reality [${velocityCategory}: ${weeklyVolume} sales/week]`
+                reasoning: `Even ${(minProfitMargin*100).toFixed(1)}% margin (€${adjustedPrice.toFixed(2)}) exceeds recent market reality [${velocityCategory}: ${weeklyVolume} sales/week]`
             };
         }
         
@@ -297,74 +349,123 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
 }
 
 /**
- * Simple 3-level confidence calculation - LOWERED THRESHOLDS for more opportunities
+ * Enhanced confidence calculation with stability and color-coding support
  */
 function calculateOverallConfidence(marketData, multiTimeframeData, smartPricing, salesVolume, currentQuantity) {
     let score = 0;
     const factors = [];
     
-    // Sales data quality (40% of confidence) - OPTIMIZED REQUIREMENTS for perfect balance
-    if (salesVolume >= 8) { // Quality-focused threshold
-        score += 40;
-        factors.push('Excellent sales volume (8+)');
-    } else if (salesVolume >= 4) { // Balanced threshold
+    // Recent data quality (35% of confidence) - Recent timeframes are more important
+    const recentDataQuality = multiTimeframeData.recentDataQuality;
+    const bestPeriod = multiTimeframeData.bestTimeframe.period;
+    
+    if (recentDataQuality === 'EXCELLENT' && salesVolume >= 8) {
+        score += 35;
+        factors.push('Excellent recent data (24h, 8+ sales)');
+    } else if (recentDataQuality === 'EXCELLENT' && salesVolume >= 3) {
         score += 32;
-        factors.push('Good sales volume (4+)');
-    } else if (salesVolume >= 2) { // Minimum viable threshold
-        score += 24;
-        factors.push('Moderate sales volume (2+)');
+        factors.push('Excellent recent data (24h, 3+ sales)');
+    } else if (recentDataQuality === 'GOOD' && salesVolume >= 5) {
+        score += 30;
+        factors.push('Good recent data (7d, 5+ sales)');
+    } else if (recentDataQuality === 'GOOD' && salesVolume >= 2) {
+        score += 25;
+        factors.push('Good recent data (7d, 2+ sales)');
+    } else if (bestPeriod === '30d' && salesVolume >= 10) {
+        score += 20;
+        factors.push('Monthly data fallback (10+ sales)');
     } else if (salesVolume >= 1) {
-        score += 16;
-        factors.push('Low sales volume (1+)');
+        score += 15;
+        factors.push('Limited recent data');
     } else {
         score += 8;
-        factors.push('Very low sales volume');
+        factors.push('Very limited data');
     }
     
-    // Market competition (30% of confidence)
-    if (currentQuantity >= 5 && currentQuantity <= 20) {
-        score += 30;
-        factors.push('Healthy competition (5-20 listings)');
-    } else if (currentQuantity >= 2 && currentQuantity <= 30) {
-        score += 24;
-        factors.push('Good competition (2-30 listings)');
-    } else if (currentQuantity >= 1) {
-        score += 18;
-        factors.push('Limited competition');
-    } else {
+    // Market stability (25% of confidence) - Price volatility check
+    const currentMinPrice = marketData.min_price;
+    const currentMaxPrice = marketData.max_price;
+    const currentMeanPrice = marketData.mean_price;
+    const priceSpread = ((currentMaxPrice - currentMinPrice) / currentMeanPrice) * 100;
+    
+    if (priceSpread <= 10) {
+        score += 25;
+        factors.push('Very stable pricing (<10% spread)');
+    } else if (priceSpread <= 20) {
+        score += 20;
+        factors.push('Stable pricing (10-20% spread)');
+    } else if (priceSpread <= 35) {
+        score += 15;
+        factors.push('Moderate volatility (20-35% spread)');
+    } else if (priceSpread <= 50) {
         score += 10;
-        factors.push('No current competition');
+        factors.push('High volatility (35-50% spread)');
+    } else {
+        score += 5;
+        factors.push('Very high volatility (>50% spread)');
     }
     
-    // Pricing strategy confidence (30% of confidence)
+    // Market liquidity (25% of confidence) - Competition and volume
+    if (currentQuantity >= 5 && currentQuantity <= 25 && salesVolume >= 5) {
+        score += 25;
+        factors.push('Excellent liquidity (5-25 listings, 5+ sales)');
+    } else if (currentQuantity >= 2 && currentQuantity <= 35 && salesVolume >= 3) {
+        score += 20;
+        factors.push('Good liquidity (2-35 listings, 3+ sales)');
+    } else if (currentQuantity >= 1 && salesVolume >= 2) {
+        score += 15;
+        factors.push('Moderate liquidity');
+    } else if (currentQuantity >= 1) {
+        score += 10;
+        factors.push('Limited liquidity');
+    } else {
+        score += 5;
+        factors.push('Poor liquidity');
+    }
+    
+    // Pricing strategy confidence (15% of confidence)
     if (smartPricing.strategy === 'SALES_BASED' && smartPricing.confidence === 'HIGH') {
-        score += 30;
+        score += 15;
         factors.push('High-confidence sales-based pricing');
     } else if (smartPricing.strategy === 'HYBRID' && smartPricing.confidence !== 'VERY_LOW') {
-        score += 25;
+        score += 12;
         factors.push('Balanced pricing strategy');
     } else if (smartPricing.confidence !== 'VERY_LOW') {
-        score += 20;
+        score += 8;
         factors.push('Reasonable pricing confidence');
     } else {
-        score += 10;
+        score += 5;
         factors.push('Limited pricing confidence');
     }
     
-    // Determine final confidence level - PERFECT BALANCE THRESHOLDS
-    let confidenceLevel;
-    if (score >= 65) { // Easier to achieve HIGH confidence
+    // Determine confidence level with color coding
+    let confidenceLevel, colorCode, stabilityRating;
+    
+    if (score >= 70 && priceSpread <= 20) {
         confidenceLevel = 'HIGH';
-    } else if (score >= 45) { // Easier to achieve MEDIUM confidence
+        colorCode = 'GREEN'; // Safe, stable, profitable
+        stabilityRating = 'STABLE';
+    } else if (score >= 50 && priceSpread <= 35) {
         confidenceLevel = 'MEDIUM';
+        colorCode = 'ORANGE'; // Proceed with caution
+        stabilityRating = priceSpread <= 25 ? 'MODERATE' : 'VOLATILE';
     } else {
         confidenceLevel = 'LOW';
+        colorCode = 'RED'; // High risk, avoid or be very careful
+        stabilityRating = priceSpread > 50 ? 'VERY_VOLATILE' : 'UNSTABLE';
     }
     
     return {
         level: confidenceLevel,
         score: Math.round(score),
-        factors
+        factors,
+        colorCode,
+        stabilityRating,
+        marketMetrics: {
+            priceSpread: priceSpread.toFixed(1),
+            recentDataQuality,
+            dataTimeframe: bestPeriod
+        }
     };
 }
 
@@ -1001,7 +1102,7 @@ app.post('/analyze-prices', async (req, res) => {
                 continue;
             }
             
-            // Calculate overall confidence using simplified system
+            // Calculate overall confidence using enhanced system with color coding
             const overallConfidence = calculateOverallConfidence(
                 marketData, 
                 multiTimeframeAnalysis, 
@@ -1015,15 +1116,26 @@ app.post('/analyze-prices', async (req, res) => {
             const conservativePrice = currentMinPrice * 0.90;
             const aggressivePrice = currentMinPrice * 0.98;
             
-            // Time estimate based on confidence and market conditions
+            // Enhanced time estimate based on confidence, market conditions, and recent data quality
             let timeEstimate;
-            if (overallConfidence.level === 'HIGH') {
+            const recentDataQuality = multiTimeframeAnalysis.recentDataQuality;
+            
+            if (overallConfidence.level === 'HIGH' && recentDataQuality === 'EXCELLENT') {
                 timeEstimate = '1-3 days';
-            } else if (overallConfidence.level === 'MEDIUM') {
+            } else if (overallConfidence.level === 'HIGH') {
+                timeEstimate = '2-4 days';
+            } else if (overallConfidence.level === 'MEDIUM' && recentDataQuality === 'EXCELLENT') {
                 timeEstimate = '2-5 days';
+            } else if (overallConfidence.level === 'MEDIUM') {
+                timeEstimate = '3-7 days';
             } else {
-                timeEstimate = '4-7 days';
+                timeEstimate = '5-10 days';
             }
+            
+            // Get recent sales data for better market context
+            const recent24hData = multiTimeframeAnalysis.allTimeframes.find(t => t.period === '24h')?.data;
+            const recent7dData = multiTimeframeAnalysis.allTimeframes.find(t => t.period === '7d')?.data;
+            const recentAvg = recent24hData?.avg || recent7dData?.avg || priceData.avg;
             
             // Validate pricing against sales history
             const salesAvgPrice = priceData.avg;
@@ -1102,16 +1214,28 @@ app.post('/analyze-prices', async (req, res) => {
                 profitAmount: profitAmount.toFixed(2),
                 profitPercentage: profitPercentage.toFixed(1),
                 
-                // Confidence and market analysis
+                // Confidence and market analysis with color coding
                 confidence: overallConfidence.level,
                 confidenceScore: overallConfidence.score,
                 confidenceFactors: overallConfidence.factors,
+                confidenceColor: overallConfidence.colorCode,
+                stabilityRating: overallConfidence.stabilityRating,
                 timeEstimate: enhancedTimeEstimate,
                 pricingStrategy: smartPricing.strategy,
                 pricingReasoning: smartPricing.reasoning,
                 trend: multiTimeframeAnalysis.trend,
                 pricePosition: Math.round(pricePosition * 100),
                 marketVolatility: marketVolatility.toFixed(1),
+                
+                // Enhanced market context with recent data priority
+                recentMarketData: {
+                    dataQuality: multiTimeframeAnalysis.recentDataQuality,
+                    timeframe: timeframePeriod,
+                    recentAvg: recentAvg.toFixed(2),
+                    vs24h: recent24hData ? `€${recent24hData.avg.toFixed(2)} (${recent24hData.volume} sales)` : 'No data',
+                    vs7d: recent7dData ? `€${recent7dData.avg.toFixed(2)} (${recent7dData.volume} sales)` : 'No data',
+                    priceSpread: overallConfidence.marketMetrics.priceSpread + '%'
+                },
                 
                 // Market metrics for volatility display
                 metrics: marketMetrics,
