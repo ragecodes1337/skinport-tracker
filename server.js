@@ -14,6 +14,7 @@ const cache = new NodeCache({ stdTTL: 300, checkperiod: 120 });
 const SKINPORT_API_URL = 'https://api.skinport.com/v1';
 const APP_ID_CSGO = 730;
 const SKINPORT_FEE = 0.08; // 8% seller fee
+const MINIMUM_PROFIT_THRESHOLD = 0.50; // Minimum €0.50 profit
 
 // Rate limiting configuration - Skinport allows 8 requests per 5 minutes
 const RATE_LIMIT_WINDOW = 5 * 60 * 1000; // 5 minutes in milliseconds
@@ -23,6 +24,190 @@ const requestQueue = []; // Queue to store timestamps of requests
 // Middleware
 app.use(cors());
 app.use(express.json());
+
+// WEEKLY FLIP Trading Analysis - 3-7 Day Strategy for Best Accuracy & Sales
+function analyzeWeeklyFlipViability(itemName, priceData, salesData, trend, stability) {
+    const volume = priceData.volume;
+    const avgPrice = priceData.avg;
+    const maxPrice = priceData.max;
+    const minPrice = priceData.min;
+    const hasRecentActivity = salesData.last_7_days && salesData.last_7_days.volume > 0;
+    
+    let score = 0;
+    let reasons = [];
+    let recommendation = 'AVOID';
+    
+    // For weekly flips, we need good weekly volume (35% of score)
+    const weeklyVolume = Math.max(volume / 4, salesData.last_7_days?.volume || 0); // Weekly estimate
+    if (weeklyVolume >= 50) {
+        score += 35;
+        reasons.push('Excellent weekly volume (50+ sales) - reliable liquidity');
+    } else if (weeklyVolume >= 25) {
+        score += 30;
+        reasons.push('Good weekly volume (25+ sales) - good liquidity');
+    } else if (weeklyVolume >= 15) {
+        score += 20;
+        reasons.push('Moderate weekly volume (15+ sales) - decent liquidity');
+    } else if (weeklyVolume >= 8) {
+        score += 10;
+        reasons.push('Low weekly volume (8+ sales) - may take longer');
+    } else {
+        reasons.push('Very low weekly volume (<8 sales) - RISKY');
+    }
+    
+    // Price stability is important for 3-7 day holds (25% of score)
+    const priceRange = maxPrice - minPrice;
+    const priceStability = 100 - ((priceRange / avgPrice) * 100);
+    if (priceStability >= 80) {
+        score += 25;
+        reasons.push('Very stable pricing (>80%) - low risk');
+    } else if (priceStability >= 60) {
+        score += 20;
+        reasons.push('Stable pricing (60-80%) - manageable risk');
+    } else if (priceStability >= 40) {
+        score += 15;
+        reasons.push('Somewhat stable pricing (40-60%)');
+    } else if (priceStability >= 20) {
+        score += 10;
+        reasons.push('Unstable pricing (20-40%) - higher risk');
+    } else {
+        reasons.push('Very unstable pricing (<20%) - HIGH RISK');
+    }
+    
+    // Market position - buying in bottom 30% is ideal (20% of score)
+    const currentPos = (avgPrice - minPrice) / (maxPrice - minPrice || 1);
+    if (currentPos <= 0.3) {
+        score += 20;
+        reasons.push('Excellent entry point (bottom 30% of range)');
+    } else if (currentPos <= 0.5) {
+        score += 15;
+        reasons.push('Good entry point (below median)');
+    } else if (currentPos <= 0.7) {
+        score += 10;
+        reasons.push('Fair entry point (above median)');
+    } else {
+        score += 5;
+        reasons.push('Poor entry point (top 30% of range)');
+    }
+    
+    // Recent activity check - should have sales within week (20% of score)
+    if (hasRecentActivity) {
+        const weeklyVol = salesData.last_7_days.volume;
+        if (weeklyVol >= 20) {
+            score += 20;
+            reasons.push('High weekly activity (20+ sales this week)');
+        } else if (weeklyVol >= 10) {
+            score += 15;
+            reasons.push('Good weekly activity (10+ sales this week)');
+        } else if (weeklyVol >= 5) {
+            score += 10;
+            reasons.push('Moderate weekly activity (5+ sales this week)');
+        } else {
+            score += 5;
+            reasons.push('Low weekly activity (1-4 sales this week)');
+        }
+    } else {
+        reasons.push('No recent weekly activity - may take longer to sell');
+    }
+    
+    // Determine recommendation for weekly flips
+    if (score >= 80) {
+        recommendation = 'WEEKLY_FLIP_EXCELLENT';
+    } else if (score >= 65) {
+        recommendation = 'WEEKLY_FLIP_GOOD';
+    } else if (score >= 45) {
+        recommendation = 'WEEKLY_FLIP_MODERATE';
+    } else {
+        recommendation = 'AVOID_WEEKLY_FLIP';
+    }
+    
+    // Calculate weekly flip metrics
+    let estimatedSellDays = '5-7'; // Default estimate
+    let targetMarginPercentage = 10; // Realistic margins for weekly flips
+    let sellProbability = 60;
+    
+    if (score >= 80) {
+        estimatedSellDays = '1-3';
+        targetMarginPercentage = 12;
+        sellProbability = 90;
+    } else if (score >= 65) {
+        estimatedSellDays = '3-5';
+        targetMarginPercentage = 10;
+        sellProbability = 75;
+    } else if (score >= 45) {
+        estimatedSellDays = '5-7';
+        targetMarginPercentage = 8;
+        sellProbability = 60;
+    } else {
+        estimatedSellDays = '7+';
+        targetMarginPercentage = 15;
+        sellProbability = 40;
+    }
+    
+    return {
+        score,
+        recommendation,
+        reasons,
+        estimatedSellDays,
+        targetMarginPercentage,
+        sellProbability,
+        hasRecentActivity,
+        priceStability: priceStability.toFixed(1),
+        weeklyVolume: Math.round(weeklyVolume)
+    };
+}
+
+// Calculate weekly flip selling strategy - balanced pricing for 3-7 day sales
+function calculateWeeklyFlipStrategy(buyPrice, marketData, viability) {
+    const avg = marketData.avg;
+    const max = marketData.max;
+    const min = marketData.min;
+    
+    // For weekly flips, we can price closer to average but still competitive
+    // Target 75th-90th percentile for good balance of speed and profit
+    
+    // Quick sale pricing (3-4 days): 75th percentile 
+    const quickSalePrice = min + ((avg - min) * 0.75);
+    
+    // Standard pricing (4-6 days): 80th percentile
+    const standardPrice = min + ((avg - min) * 0.80);
+    
+    // Patient pricing (5-7 days): 85th percentile
+    const patientPrice = min + ((avg - min) * 0.85);
+    
+    // Choose pricing based on viability and desired sell time
+    let recommendedPrice;
+    let expectedDays;
+    
+    if (viability.recommendation === 'WEEKLY_FLIP_EXCELLENT' && viability.score >= 80) {
+        recommendedPrice = patientPrice; // Can afford to wait for better price
+        expectedDays = '2-4';
+    } else if (viability.recommendation === 'WEEKLY_FLIP_GOOD') {
+        recommendedPrice = standardPrice; // Balanced approach
+        expectedDays = '3-5';
+    } else {
+        recommendedPrice = quickSalePrice; // Price aggressively to ensure sale
+        expectedDays = '4-7';
+    }
+    
+    // Ensure minimum profit margin
+    const minProfitMargin = 0.08; // 8% minimum
+    const minPrice = buyPrice * (1 + minProfitMargin);
+    if (recommendedPrice < minPrice) {
+        recommendedPrice = minPrice;
+        expectedDays = '5-7'; // Might take longer with higher price
+    }
+    
+    return {
+        quick: quickSalePrice,
+        standard: standardPrice,
+        patient: patientPrice,
+        recommended: recommendedPrice,
+        expectedProfit: recommendedPrice - buyPrice,
+        expectedMargin: ((recommendedPrice - buyPrice) / buyPrice) * 100,
+        expectedDays
+    };
+}
 
 /**
  * Delays execution for a given number of milliseconds.
@@ -384,35 +569,56 @@ app.post('/analyze-prices', async (req, res) => {
             const priceRange = maxPrice - minPrice;
             const coefficientOfVariation = (priceRange / avgPrice) * 100; // CV as percentage
             
-            // IMPROVED: Price-tier aware stability calculation with special case handling
+            // ENHANCED: 7-10 day trading focused stability calculation
             let priceStability;
             
-            // Special handling for very high volume, low-price items (cases, stickers, etc.)
-            if (avgPrice < 2.0 && volume >= 1000) {
-                // For high-volume cases/consumables, focus on volume rather than price stability
-                // Use much more lenient stability calculation
-                const veryLenientCV = Math.min(coefficientOfVariation * 0.3, 100); // Reduce impact by 70%
-                priceStability = Math.max(100 - veryLenientCV, 20); // Minimum 20% stability for high-volume items
-                console.log(`[Stability] ${itemName}: High-volume case detected, using lenient calculation`);
+            // For 7-10 day trading, we need much stricter volatility control
+            const isDangerouslyVolatile = coefficientOfVariation > 300; // Items like AWP Redline with 774% variance
+            const isHighlyVolatile = coefficientOfVariation > 150;
+            const trendPenalty = trend === 'FALLING' ? 25 : trend === 'RISING' ? -5 : 0;
+            
+            if (isDangerouslyVolatile) {
+                // Auto-reject items with extreme volatility for short-term trading
+                priceStability = 0;
+                console.log(`[7-Day Trading] ${itemName}: REJECTED - Dangerously volatile (CV: ${coefficientOfVariation.toFixed(1)}%)`);
+            } else if (avgPrice < 2.0 && volume >= 1000) {
+                // High-volume cases/consumables - good for short-term trading
+                const lenientCV = Math.min(coefficientOfVariation * 0.4, 100);
+                priceStability = Math.max(100 - lenientCV - trendPenalty, 25);
+                console.log(`[7-Day Trading] ${itemName}: High-volume case - suitable for quick flips`);
+            } else if (volume >= 2000) {
+                // Very high volume items - more forgiving but still strict for 7-day trading
+                const adjustedCV = Math.min(coefficientOfVariation * 0.6, 100);
+                priceStability = Math.max(100 - adjustedCV - trendPenalty, 15);
+                console.log(`[7-Day Trading] ${itemName}: High-volume item - moderate risk for quick trading`);
             } else if (avgPrice < 1.0) {
-                // For other items under €1 (like cases), use less strict stability calculation
-                const adjustedCV = Math.min(coefficientOfVariation * 0.6, 100); // Reduce impact by 40%
-                priceStability = 100 - adjustedCV;
+                // Other cheap items - need decent volume for 7-day trading
+                if (volume < 50) {
+                    priceStability = 0; // Reject low-volume cheap items for short-term trading
+                } else {
+                    const adjustedCV = Math.min(coefficientOfVariation * 0.7, 100);
+                    priceStability = Math.max(100 - adjustedCV - trendPenalty, 10);
+                }
             } else if (avgPrice < 50.0) {
-                // For mid-range items (€1-50), standard calculation
-                priceStability = 100 - Math.min(coefficientOfVariation, 100);
-            } else if (avgPrice < 500.0) {
-                // For expensive items (€50-500), be stricter about volatility
-                const stricterCV = Math.min(coefficientOfVariation * 1.3, 100); // Increase impact by 30%
-                priceStability = 100 - stricterCV;
+                // Mid-range items - stricter requirements for 7-day trading
+                if (isHighlyVolatile || volume < 30) {
+                    priceStability = Math.max(100 - coefficientOfVariation * 1.4 - trendPenalty, 0);
+                } else {
+                    const adjustedCV = Math.min(coefficientOfVariation * 0.9, 100);
+                    priceStability = Math.max(100 - adjustedCV - trendPenalty, 5);
+                }
             } else {
-                // For very expensive items (€500+), be very strict about volatility
-                const veryStrictCV = Math.min(coefficientOfVariation * 1.6, 100); // Increase impact by 60%
-                priceStability = 100 - veryStrictCV;
-                
-                // Additional penalty for absolute price swings on expensive items
-                const absoluteSwingPenalty = Math.min((priceRange / avgPrice) * 50, 30); // Up to 30% penalty
-                priceStability = Math.max(priceStability - absoluteSwingPenalty, 0);
+                // Expensive items (€50+) - very strict for 7-day trading
+                if (isHighlyVolatile || volume < 20) {
+                    priceStability = 0; // Reject volatile or low-volume expensive items
+                } else {
+                    const strictCV = Math.min(coefficientOfVariation * 1.5, 100);
+                    priceStability = Math.max(100 - strictCV - trendPenalty, 0);
+                    
+                    // Additional penalty for absolute price swings on expensive items
+                    const absoluteSwingPenalty = Math.min((priceRange / avgPrice) * 40, 25);
+                    priceStability = Math.max(priceStability - absoluteSwingPenalty, 0);
+                }
             }
             
             // Ensure stability is never negative
@@ -463,116 +669,88 @@ app.post('/analyze-prices', async (req, res) => {
             
             console.log(`[Pricing] ${itemName}: Weighted=${weightedPrice.toFixed(2)}, Percentile=${percentilePrice.toFixed(2)}, Conservative=${conservativePrice.toFixed(2)}`);
             
-            // Enhanced liquidity analysis with volume quality requirements
+            // Enhanced liquidity analysis with INSTANT FLIP focus
             let achievablePrice;
             let liquidityRating;
             let riskLevel;
             let profitConfidence;
             
-            // Volume quality assessment - require consistent recent activity for good ratings
-            const hasRecentActivity = salesData.last_7_days && salesData.last_7_days.volume >= 3;
-            const volumeConsistency = hasRecentActivity ? 'CONSISTENT' : 'SPORADIC';
+            // Volume quality assessment - prioritize 24h activity for instant flips
+            const hasRecentActivity = salesData.last_24_hours && salesData.last_24_hours.volume >= 1;
+            const has24hHighActivity = salesData.last_24_hours && salesData.last_24_hours.volume >= 5;
+            const volumeConsistency = has24hHighActivity ? 'EXCELLENT' : hasRecentActivity ? 'GOOD' : 'POOR';
             
-            // ENHANCED: Volume-first liquidity criteria with special case handling
+            // INSTANT FLIP: Volume-first liquidity criteria with 24h activity bonus
             let isHighVolumeItem = false;
-            let isUltraHighVolumeItem = volume >= 1000; // Cases, popular consumables
+            let isUltraHighVolumeItem = volume >= 500; // Lower threshold for instant flips
             let volumeThreshold = {
+                excellent: 10, // New tier for instant flips
                 good: 5,
                 medium: 3, 
-                poor: 2
+                poor: 1 // Lower barrier for instant consideration
             };
             
-            // Handle ultra-high-volume items first (cases, stickers, etc.)
-            if (isUltraHighVolumeItem) {
-                console.log(`[Liquidity] ${itemName}: Ultra-high-volume item detected (${volume} sales)`);
-                if (volume >= 10000) {
-                    liquidityRating = 'GOOD';
-                    achievablePrice = conservativePrice * 0.98; // Only 2% discount for ultra-high volume
-                    profitConfidence = Math.min(95, 80 + Math.min(volume * 0.001, 15)); // Volume-based confidence
+            // Handle ultra-high-volume items first (excellent for instant flips)
+            if (isUltraHighVolumeItem && hasRecentActivity) {
+                console.log(`[Instant Liquidity] ${itemName}: Ultra-high-volume with recent activity (${volume} sales, 24h: ${salesData.last_24_hours?.volume || 0})`);
+                if (volume >= 2000 && has24hHighActivity) {
+                    liquidityRating = 'EXCELLENT';
+                    achievablePrice = conservativePrice * 0.99; // Only 1% discount for instant flip
+                    profitConfidence = Math.min(95, 85 + Math.min(volume * 0.001, 10)); 
+                    riskLevel = 'VERY_LOW';
+                } else if (volume >= 1000 && hasRecentActivity) {
+                    liquidityRating = 'EXCELLENT';
+                    achievablePrice = conservativePrice * 0.98; // 2% discount
+                    profitConfidence = Math.min(90, 80 + Math.min(volume * 0.002, 10));
                     riskLevel = 'LOW';
-                } else if (volume >= 5000) {
+                } else if (volume >= 500) {
                     liquidityRating = 'GOOD';
                     achievablePrice = conservativePrice * 0.97; // 3% discount
-                    profitConfidence = Math.min(90, 75 + Math.min(volume * 0.002, 15));
-                    riskLevel = 'LOW';
-                } else if (volume >= 1000) {
-                    liquidityRating = 'GOOD';
-                    achievablePrice = conservativePrice * 0.96; // 4% discount
-                    profitConfidence = Math.min(85, 70 + Math.min(volume * 0.005, 15));
-                    riskLevel = priceStability > 30 ? 'LOW' : 'MEDIUM';
+                    profitConfidence = Math.min(85, 75 + Math.min(volume * 0.005, 10));
+                    riskLevel = priceStability > 20 ? 'LOW' : 'MEDIUM';
                 }
             } else {
-                // Adjust volume requirements based on price tier for regular items
-                if (avgPrice >= 1000) {
-                    // Very expensive items (€1000+) need much higher volume for good liquidity
-                    volumeThreshold = { good: 50, medium: 20, poor: 10 };
-                    isHighVolumeItem = volume >= 50;
-                } else if (avgPrice >= 500) {
-                    // Expensive items (€500-1000) need higher volume
-                    volumeThreshold = { good: 30, medium: 15, poor: 8 };
-                    isHighVolumeItem = volume >= 30;
-                } else if (avgPrice >= 100) {
-                    // Mid-expensive items (€100-500) need moderate volume
-                    volumeThreshold = { good: 20, medium: 10, poor: 5 };
-                    isHighVolumeItem = volume >= 20;
-                } else if (avgPrice >= 10) {
-                    // Regular items (€10-100) use standard thresholds
-                    volumeThreshold = { good: 10, medium: 5, poor: 3 };
-                    isHighVolumeItem = volume >= 20;
-                } else {
-                    // Cheap items (under €10) can have lower volume requirements
-                    volumeThreshold = { good: 5, medium: 3, poor: 2 };
-                    isHighVolumeItem = volume >= 20;
-                }
+                // Adjust volume requirements based on 24h activity and total volume
+                const dailyVolume = salesData.last_24_hours?.volume || 0;
                 
-                console.log(`[Liquidity] ${itemName}: Price=€${avgPrice.toFixed(2)}, Volume=${volume}, Thresholds: Good=${volumeThreshold.good}, Med=${volumeThreshold.medium}, Poor=${volumeThreshold.poor}`);
-                
-                if (isHighVolumeItem && avgPrice < 100) {
-                    // Special criteria for high-volume, lower-priced items (popular skins)
-                    if (volume >= 50) {
-                        liquidityRating = 'GOOD';
-                        achievablePrice = conservativePrice * 0.97; // Only 3% discount for very high volume
-                        profitConfidence = Math.min(90, 70 + (priceStability * 0.3) + Math.min(volume * 0.5, 20));
-                        riskLevel = 'LOW';
-                    } else if (volume >= 20) {
-                        liquidityRating = 'GOOD';
-                        achievablePrice = conservativePrice * 0.95; // 5% discount for high volume
-                        profitConfidence = Math.min(85, 60 + (priceStability * 0.3) + Math.min(volume * 0.8, 25));
-                        riskLevel = priceStability > 30 ? 'LOW' : 'MEDIUM';
-                    } else if (volume >= 10) {
-                        liquidityRating = 'MEDIUM';
-                        achievablePrice = conservativePrice * 0.93; // 7% discount
-                        profitConfidence = Math.min(75, 45 + (priceStability * 0.4) + (volume * 1.5));
-                        riskLevel = 'MEDIUM';
-                    }
+                // Instant flip scoring: daily activity is CRITICAL
+                if (dailyVolume >= 10 && volume >= 100) {
+                    liquidityRating = 'EXCELLENT';
+                    achievablePrice = conservativePrice * 0.98; // 2% discount for high daily activity
+                    profitConfidence = Math.min(90, 70 + (dailyVolume * 2) + (priceStability * 0.2));
+                    riskLevel = 'VERY_LOW';
+                    isHighVolumeItem = true;
+                } else if (dailyVolume >= 5 && volume >= 50) {
+                    liquidityRating = 'GOOD';
+                    achievablePrice = conservativePrice * 0.96; // 4% discount
+                    profitConfidence = Math.min(85, 60 + (dailyVolume * 3) + (priceStability * 0.3));
+                    riskLevel = 'LOW';
+                    isHighVolumeItem = true;
+                } else if (dailyVolume >= 2 && volume >= 30) {
+                    liquidityRating = 'MEDIUM';
+                    achievablePrice = conservativePrice * 0.94; // 6% discount
+                    profitConfidence = Math.min(75, 45 + (dailyVolume * 5) + (priceStability * 0.3));
+                    riskLevel = 'MEDIUM';
+                } else if (dailyVolume >= 1 && volume >= 20) {
+                    liquidityRating = 'POOR';
+                    achievablePrice = conservativePrice * 0.91; // 9% discount
+                    profitConfidence = Math.min(65, 35 + (dailyVolume * 8) + (priceStability * 0.2));
+                    riskLevel = 'HIGH';
+                } else if (volume >= 100) {
+                    // High total volume but no recent activity - risky for instant flip
+                    liquidityRating = 'POOR';
+                    achievablePrice = conservativePrice * 0.88; // 12% discount
+                    profitConfidence = Math.min(60, 30 + (volume * 0.1) + (priceStability * 0.2));
+                    riskLevel = 'HIGH';
                 } else {
-                    // Price-tier aware liquidity assessment
-                    if (volume >= volumeThreshold.good && priceStability > 50) {
-                        liquidityRating = 'GOOD';
-                        achievablePrice = conservativePrice * 0.96; // 4% discount for quick sale
-                        profitConfidence = Math.min(90, 50 + (priceStability * 0.4) + (volume * 2.0));
-                        riskLevel = avgPrice >= 500 ? 'MEDIUM' : 'LOW'; // Expensive items are inherently riskier
-                    } else if (volume >= volumeThreshold.medium && priceStability > 30) {
-                        liquidityRating = 'MEDIUM';
-                        achievablePrice = conservativePrice * 0.93; // 7% discount
-                        profitConfidence = Math.min(75, 35 + (priceStability * 0.4) + (volume * 3.0));
-                        riskLevel = avgPrice >= 500 ? 'HIGH' : hasRecentActivity ? 'MEDIUM' : 'MEDIUM_HIGH';
-                    } else if (volume >= volumeThreshold.poor && priceStability > 20) {
-                        liquidityRating = 'POOR';
-                        achievablePrice = conservativePrice * 0.89; // 11% discount
-                        profitConfidence = Math.min(60, 25 + (priceStability * 0.4) + (volume * 4.0));
-                        riskLevel = avgPrice >= 500 ? 'VERY_HIGH' : 'HIGH';
-                    } else {
-                        liquidityRating = 'VERY_POOR';
-                        // Even risky items can be profitable if price is right
-                        achievablePrice = conservativePrice * 0.85;
-                        profitConfidence = Math.min(50, 20 + (priceStability * 0.3) + (volume * 5.0));
-                        riskLevel = 'VERY_HIGH';
-                    }
+                    liquidityRating = 'VERY_POOR';
+                    achievablePrice = conservativePrice * 0.85; // 15% discount - not suitable for instant flip
+                    profitConfidence = Math.min(50, 20 + (volume * 0.2) + (priceStability * 0.1));
+                    riskLevel = 'VERY_HIGH';
                 }
             }
             
-            console.log(`[Liquidity] ${itemName}: Volume=${volume}, UltraHighVol=${isUltraHighVolumeItem}, HighVol=${isHighVolumeItem}, Rating=${liquidityRating}, Risk=${riskLevel}, Confidence=${profitConfidence.toFixed(0)}%`);
+            console.log(`[Instant Liquidity] ${itemName}: Volume=${volume}, Daily=${dailyVolume}, Rating=${liquidityRating}, Risk=${riskLevel}, Confidence=${profitConfidence.toFixed(0)}%`);
             
             // Apply Skinport's 8% seller fee to achievable price
             const netAchievablePrice = achievablePrice * 0.92; // After 8% fee
@@ -617,15 +795,22 @@ app.post('/analyze-prices', async (req, res) => {
                 console.log(`[Trend] ${itemName}: ${trendChange.toFixed(1)}% change, trend=${trendIndicator}`);
             }
 
-            // RELAXED profit validation - much lower criteria for testing
+            // WEEKLY FLIP ANALYSIS - 3-7 Day Strategy for Best Accuracy & Sales
+            const weeklyFlipViability = analyzeWeeklyFlipViability(itemName, priceData, salesData, trendIndicator, priceStability);
+            const weeklyFlipStrategy = calculateWeeklyFlipStrategy(skinportPriceNum, priceData, weeklyFlipViability);
+            
+            // ENHANCED profit validation with WEEKLY FLIP focus
             const meetsBasicCriteria = profitAmount >= adjustedMinProfit && profitPercentage >= adjustedMinPercentage;
-            const meetsConfidenceCriteria = profitConfidence >= 10; // Reduced from 15 to 10
-            const meetsStabilityCriteria = true; // DISABLED stability requirement - was rejecting too many items
+            const meetsConfidenceCriteria = profitConfidence >= 15; // Slightly higher confidence for weekly holds
+            const meetsStabilityCriteria = priceStability >= 15; // Higher stability needed for weekly holds
+            const meetsWeeklyFlipCriteria = weeklyFlipViability.score >= 45; // Lower threshold but more realistic
+            const hasGoodLiquidity = volume >= 50 && weeklyFlipViability.weeklyVolume >= 8; // Weekly volume focus
             
             console.log(`[Validation] ${itemName}: Profit=${profitAmount.toFixed(2)}, Percentage=${profitPercentage.toFixed(1)}%, Confidence=${profitConfidence}%, Stability=${priceStability}%`);
-            console.log(`[Validation] Criteria: Basic=${meetsBasicCriteria}, Confidence=${meetsConfidenceCriteria}, Stability=${meetsStabilityCriteria} (disabled)`);
+            console.log(`[Weekly Flip] ${itemName}: Viability=${weeklyFlipViability.recommendation} (${weeklyFlipViability.score}/100), Days=${weeklyFlipViability.estimatedSellDays}`);
+            console.log(`[Validation] Criteria: Basic=${meetsBasicCriteria}, Confidence=${meetsConfidenceCriteria}, Stability=${meetsStabilityCriteria}, WeeklyFlip=${meetsWeeklyFlipCriteria}, GoodLiquidity=${hasGoodLiquidity}`);
             
-            if (meetsBasicCriteria && meetsConfidenceCriteria && meetsStabilityCriteria) {
+            if (meetsBasicCriteria && meetsConfidenceCriteria && meetsWeeklyFlipCriteria && hasGoodLiquidity) {
                 analyzedItems.push({
                     ...item,
                     name: itemName,
@@ -664,6 +849,28 @@ app.post('/analyze-prices', async (req, res) => {
                                    profitPercentage > 15 && liquidityRating !== 'VERY_POOR' && profitConfidence > 50 ? 'BUY' : 
                                    profitPercentage > 8 ? 'CONSIDER' :
                                    profitPercentage < 5 && volume < 2 && priceStability < 10 ? 'AVOID' : 'HOLD',
+                    
+                    // WEEKLY FLIP TRADING SPECIFIC DATA
+                    weeklyFlipTrading: {
+                        viability: weeklyFlipViability.recommendation,
+                        viabilityScore: weeklyFlipViability.score,
+                        reasons: weeklyFlipViability.reasons,
+                        estimatedSellDays: weeklyFlipViability.estimatedSellDays,
+                        targetMarginPercentage: weeklyFlipViability.targetMarginPercentage,
+                        sellProbability: weeklyFlipViability.sellProbability,
+                        hasRecentActivity: weeklyFlipViability.hasRecentActivity,
+                        priceStability: weeklyFlipViability.priceStability,
+                        weeklyVolume: weeklyFlipViability.weeklyVolume
+                    },
+                    weeklyFlipStrategy: {
+                        quickPrice: weeklyFlipStrategy.quick.toFixed(2),
+                        standardPrice: weeklyFlipStrategy.standard.toFixed(2),
+                        patientPrice: weeklyFlipStrategy.patient.toFixed(2),
+                        recommendedPrice: weeklyFlipStrategy.recommended.toFixed(2),
+                        expectedProfit: weeklyFlipStrategy.expectedProfit.toFixed(2),
+                        expectedMargin: weeklyFlipStrategy.expectedMargin.toFixed(1),
+                        expectedDays: weeklyFlipStrategy.expectedDays
+                    },
                     
                     // Additional metadata for debugging
                     analysis: {
