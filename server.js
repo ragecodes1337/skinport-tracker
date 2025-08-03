@@ -381,37 +381,88 @@ app.post('/analyze-prices', async (req, res) => {
             const maxPrice = priceData.max;
             const volume = priceData.volume;
             
-            // Calculate achievable price based on market conditions and liquidity
+            // Advanced variance and volatility analysis
+            const priceRange = maxPrice - minPrice;
+            const coefficientOfVariation = (priceRange / avgPrice) * 100; // CV as percentage
+            const priceStability = 100 - Math.min(coefficientOfVariation, 100); // Stability score 0-100
+            
+            console.log(`[Variance] ${itemName}: CV=${coefficientOfVariation.toFixed(1)}%, Range=${priceRange.toFixed(2)}, Stability=${priceStability.toFixed(1)}%`);
+            
+            // Skip items with extreme variance (>50% coefficient of variation)
+            if (coefficientOfVariation > 50) {
+                console.log(`[Variance] Skipping high-variance item: ${itemName} (CV: ${coefficientOfVariation.toFixed(1)}%)`);
+                continue;
+            }
+            
+            // Calculate weighted pricing across timeframes (prefer recent data)
+            let weightedPrice = avgPrice;
+            let combinedVolume = volume;
+            let dataQuality = 'STANDARD';
+            
+            // Multi-timeframe analysis for better trend detection
+            if (salesData.last_7_days && salesData.last_7_days.volume > 0) {
+                const recent7d = salesData.last_7_days;
+                const recent30d = salesData.last_30_days || priceData;
+                
+                // Weight recent sales more heavily (70% recent, 30% older)
+                if (recent7d.volume >= 3) {
+                    weightedPrice = (recent7d.avg * 0.7) + (recent30d.avg * 0.3);
+                    combinedVolume = recent7d.volume + (recent30d.volume * 0.5);
+                    dataQuality = 'HIGH'; // Recent activity available
+                    console.log(`[Weighted] ${itemName}: 7d=${recent7d.avg.toFixed(2)} (70%) + 30d=${recent30d.avg.toFixed(2)} (30%) = ${weightedPrice.toFixed(2)}`);
+                }
+            }
+            
+            // Conservative percentile-based pricing instead of averages
+            let percentilePrice;
+            if (priceStability > 70) {
+                // High stability: use 40th percentile (more aggressive)
+                percentilePrice = minPrice + (priceRange * 0.40);
+            } else if (priceStability > 50) {
+                // Medium stability: use 30th percentile
+                percentilePrice = minPrice + (priceRange * 0.30);
+            } else {
+                // Low stability: use 25th percentile (very conservative)
+                percentilePrice = minPrice + (priceRange * 0.25);
+            }
+            
+            // Use the lower of weighted average or percentile price for safety
+            const conservativePrice = Math.min(weightedPrice, percentilePrice);
+            
+            console.log(`[Pricing] ${itemName}: Weighted=${weightedPrice.toFixed(2)}, Percentile=${percentilePrice.toFixed(2)}, Conservative=${conservativePrice.toFixed(2)}`);
+            
+            // Enhanced liquidity analysis with volume quality requirements
             let achievablePrice;
             let liquidityRating;
             let riskLevel;
             let profitConfidence;
             
-            // Determine liquidity rating based on volume and timeframe
-            if (volume >= 20) {
+            // Volume quality assessment - require consistent recent activity for good ratings
+            const hasRecentActivity = salesData.last_7_days && salesData.last_7_days.volume >= 3;
+            const volumeConsistency = hasRecentActivity ? 'CONSISTENT' : 'SPORADIC';
+            
+            // Determine liquidity rating with enhanced criteria
+            if (volume >= 20 && hasRecentActivity && priceStability > 60) {
                 liquidityRating = 'GOOD';
-                // For high liquidity items, use average price with small discount
-                achievablePrice = avgPrice * 0.98; // 2% discount for quick sale
-                profitConfidence = Math.min(95, 70 + (volume * 1.5));
+                achievablePrice = conservativePrice * 0.96; // 4% discount for quick sale
+                profitConfidence = Math.min(90, 60 + (priceStability * 0.3) + (volume * 0.8));
                 riskLevel = 'LOW';
-            } else if (volume >= 10) {
+            } else if (volume >= 10 && priceStability > 50) {
                 liquidityRating = 'MEDIUM';
-                // For medium liquidity, use average price with medium discount
-                achievablePrice = avgPrice * 0.95; // 5% discount for reasonable sale time
-                profitConfidence = Math.min(85, 50 + (volume * 2));
-                riskLevel = 'MEDIUM';
-            } else if (volume >= 5) {
+                achievablePrice = conservativePrice * 0.93; // 7% discount
+                profitConfidence = Math.min(75, 40 + (priceStability * 0.3) + (volume * 1.2));
+                riskLevel = hasRecentActivity ? 'MEDIUM' : 'MEDIUM_HIGH';
+            } else if (volume >= 5 && priceStability > 40) {
                 liquidityRating = 'POOR';
-                // For low liquidity, use more conservative pricing
-                achievablePrice = avgPrice * 0.92; // 8% discount for slower sale
-                profitConfidence = Math.min(70, 30 + (volume * 3));
-                riskLevel = 'MEDIUM';
+                achievablePrice = conservativePrice * 0.89; // 11% discount
+                profitConfidence = Math.min(60, 25 + (priceStability * 0.3) + (volume * 1.5));
+                riskLevel = 'HIGH';
             } else {
                 liquidityRating = 'VERY_POOR';
-                // For very low liquidity, use very conservative pricing
-                achievablePrice = Math.min(avgPrice * 0.88, minPrice * 0.95); // Use lower of 12% discount or near min price
-                profitConfidence = Math.min(50, 20 + (volume * 4));
-                riskLevel = 'HIGH';
+                // For very risky items, use minimum price as ceiling
+                achievablePrice = Math.min(conservativePrice * 0.85, minPrice * 0.98);
+                profitConfidence = Math.min(40, 15 + (priceStability * 0.2) + (volume * 2));
+                riskLevel = 'VERY_HIGH';
             }
             
             // Apply Skinport's 8% seller fee to achievable price
@@ -422,11 +473,47 @@ app.post('/analyze-prices', async (req, res) => {
             const profitAmount = netAchievablePrice - skinportPriceNum;
             const profitPercentage = ((profitAmount / skinportPriceNum) * 100);
 
-            // Check if it meets profit criteria
+            // Enhanced profit validation with risk assessment
             const minProfitAmount = parseFloat(settings.minProfitAmount || 0);
             const minProfitPercentage = parseFloat(settings.minProfitPercentage || 0);
+            
+            // Risk-adjusted profit requirements
+            let adjustedMinProfit = minProfitAmount;
+            let adjustedMinPercentage = minProfitPercentage;
+            
+            // Increase minimum requirements for high-risk items
+            if (riskLevel === 'VERY_HIGH') {
+                adjustedMinProfit *= 1.5; // Require 50% more profit for very high risk
+                adjustedMinPercentage *= 1.3; // Require 30% higher percentage
+            } else if (riskLevel === 'HIGH') {
+                adjustedMinProfit *= 1.25; // Require 25% more profit for high risk
+                adjustedMinPercentage *= 1.15; // Require 15% higher percentage
+            }
+            
+            // Market trend analysis for additional validation
+            let trendIndicator = 'STABLE';
+            if (salesData.last_7_days && salesData.last_30_days) {
+                const recent7dAvg = salesData.last_7_days.avg;
+                const older30dAvg = salesData.last_30_days.avg;
+                const trendChange = ((recent7dAvg - older30dAvg) / older30dAvg) * 100;
+                
+                if (trendChange > 10) {
+                    trendIndicator = 'RISING';
+                } else if (trendChange < -10) {
+                    trendIndicator = 'FALLING';
+                    // Be extra cautious with falling trends
+                    adjustedMinPercentage *= 1.2;
+                }
+                
+                console.log(`[Trend] ${itemName}: ${trendChange.toFixed(1)}% change, trend=${trendIndicator}`);
+            }
 
-            if (profitAmount >= minProfitAmount && profitPercentage >= minProfitPercentage) {
+            // Final profit validation with enhanced criteria
+            const meetsBasicCriteria = profitAmount >= adjustedMinProfit && profitPercentage >= adjustedMinPercentage;
+            const meetsConfidenceCriteria = profitConfidence >= 30; // Minimum confidence threshold
+            const meetsStabilityCriteria = priceStability >= 30; // Minimum price stability
+            
+            if (meetsBasicCriteria && meetsConfidenceCriteria && meetsStabilityCriteria) {
                 analyzedItems.push({
                     ...item,
                     name: itemName,
@@ -436,6 +523,7 @@ app.post('/analyze-prices', async (req, res) => {
                     steamMaxPrice: maxPrice.toFixed(2),
                     achievablePrice: netAchievablePrice.toFixed(2), // This is what user will actually get after fees
                     grossAchievablePrice: achievablePrice.toFixed(2), // Before fees
+                    conservativePrice: conservativePrice.toFixed(2), // Conservative estimate before discounts
                     profitAmount: profitAmount.toFixed(2),
                     profitPercentage: profitPercentage.toFixed(1),
                     salesCount: volume,
@@ -444,20 +532,43 @@ app.post('/analyze-prices', async (req, res) => {
                                priceData === salesData.last_30_days ? '30d' : '90d',
                     lastSaleDate: 'Recent', // Aggregated data doesn't have specific dates
                     
+                    // Enhanced risk and market analysis
+                    coefficientOfVariation: coefficientOfVariation.toFixed(1),
+                    priceStability: priceStability.toFixed(1),
+                    trendIndicator: trendIndicator,
+                    volumeConsistency: volumeConsistency,
+                    dataQuality: dataQuality,
+                    
                     // Properties expected by content script
                     profit: profitAmount,
-                    profitConfidence: profitConfidence,
+                    profitConfidence: Math.round(profitConfidence),
                     riskLevel: riskLevel,
                     liquidity: {
                         rating: liquidityRating,
-                        volume: volume
+                        volume: volume,
+                        consistency: volumeConsistency
                     },
-                    recommendation: profitPercentage > 20 && liquidityRating !== 'VERY_POOR' ? 'STRONG_BUY' : 
-                                   profitPercentage > 10 && liquidityRating !== 'VERY_POOR' ? 'BUY' : 
-                                   liquidityRating === 'VERY_POOR' ? 'AVOID' : 'CONSIDER'
+                    recommendation: profitPercentage > 25 && liquidityRating === 'GOOD' && riskLevel === 'LOW' ? 'STRONG_BUY' : 
+                                   profitPercentage > 15 && liquidityRating !== 'VERY_POOR' && profitConfidence > 60 ? 'BUY' : 
+                                   profitPercentage > 10 && riskLevel !== 'VERY_HIGH' ? 'CONSIDER' :
+                                   liquidityRating === 'VERY_POOR' || riskLevel === 'VERY_HIGH' ? 'AVOID' : 'HOLD',
+                    
+                    // Additional metadata for debugging
+                    analysis: {
+                        originalMinProfit: minProfitAmount,
+                        adjustedMinProfit: adjustedMinProfit.toFixed(2),
+                        originalMinPercentage: minProfitPercentage,
+                        adjustedMinPercentage: adjustedMinPercentage.toFixed(1),
+                        meetsBasicCriteria: meetsBasicCriteria,
+                        meetsConfidenceCriteria: meetsConfidenceCriteria,
+                        meetsStabilityCriteria: meetsStabilityCriteria
+                    }
                 });
                 
-                console.log(`[Profit] Found profitable item: ${itemName} - €${profitAmount.toFixed(2)} (${profitPercentage.toFixed(1)}%) - Liquidity: ${liquidityRating}`);
+                console.log(`[Enhanced Profit] ${itemName}:`);
+                console.log(`  Profit: €${profitAmount.toFixed(2)} (${profitPercentage.toFixed(1)}%)`);
+                console.log(`  Risk: ${riskLevel}, Confidence: ${profitConfidence.toFixed(0)}%, Stability: ${priceStability.toFixed(1)}%`);
+                console.log(`  Liquidity: ${liquidityRating}, Trend: ${trendIndicator}`);
             }
         }
 
