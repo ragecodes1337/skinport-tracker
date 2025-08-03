@@ -18,7 +18,7 @@ const MINIMUM_PROFIT_THRESHOLD = 0.50; // Minimum €0.50 profit
 
 // Rate limiting configuration - Skinport allows 8 requests per 5 minutes
 const RATE_LIMIT_WINDOW = 5 * 60 * 1000; // 5 minutes in milliseconds
-const MAX_REQUESTS_PER_WINDOW = 7; // Use 7 to be safe
+const MAX_REQUESTS_PER_WINDOW = 5; // Use 5 to be very safe (reduced from 7)
 const requestQueue = []; // Queue to store timestamps of requests
 
 // Middleware
@@ -218,25 +218,37 @@ function delay(ms) {
 
 /**
  * Rate limiter that respects Skinport's 8 requests per 5 minutes limit.
+ * We use 5 requests per 5 minutes to be conservative.
  */
 async function waitForRateLimit() {
     const now = Date.now();
+    
     // Remove old requests from the queue
     while (requestQueue.length > 0 && now - requestQueue[0] > RATE_LIMIT_WINDOW) {
         requestQueue.shift();
     }
 
+    console.log(`[Rate Limiter] Current queue: ${requestQueue.length}/${MAX_REQUESTS_PER_WINDOW} requests in last ${RATE_LIMIT_WINDOW/1000}s`);
+
     if (requestQueue.length >= MAX_REQUESTS_PER_WINDOW) {
         // Queue is full, wait for the oldest request to expire
         const oldestRequestTime = requestQueue[0];
-        const timeToWait = (oldestRequestTime + RATE_LIMIT_WINDOW) - now + 1000; // +1s buffer
+        const timeToWait = (oldestRequestTime + RATE_LIMIT_WINDOW) - now + 2000; // +2s buffer
         if (timeToWait > 0) {
-            console.log(`[Rate Limiter] Waiting ${Math.round(timeToWait/1000)}s for the next available slot.`);
+            console.log(`[Rate Limiter] Rate limit reached. Waiting ${Math.round(timeToWait/1000)}s for the next available slot.`);
             await delay(timeToWait);
+            
+            // Clean up queue again after waiting
+            const afterWait = Date.now();
+            while (requestQueue.length > 0 && afterWait - requestQueue[0] > RATE_LIMIT_WINDOW) {
+                requestQueue.shift();
+            }
         }
     }
+    
     // Add the new request timestamp to the queue
     requestQueue.push(Date.now());
+    console.log(`[Rate Limiter] Request added. Queue now: ${requestQueue.length}/${MAX_REQUESTS_PER_WINDOW}`);
 }
 
 /**
@@ -492,9 +504,10 @@ app.post('/analyze-prices', async (req, res) => {
             const batchData = await fetchSalesHistoryBatch(batches[i], settings.currency || 'EUR');
             Object.assign(allSalesData, batchData);
             
-            // Small delay between batches to be respectful
+            // Longer delay between batches to be more conservative with rate limiting
             if (i < batches.length - 1) {
-                await delay(100);
+                console.log(`[Backend] Waiting 3 seconds before next batch...`);
+                await delay(3000); // Increased from 100ms to 3 seconds
             }
         }
 
