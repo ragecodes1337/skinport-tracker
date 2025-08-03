@@ -446,7 +446,7 @@ function analyzeItemOpportunity(currentPrice, apiData, minProfit, minProfitMargi
         return null; // Skip items with insufficient data
     }
     
-    const { predictedSellingPrice, netSellingPrice, profit, profitMargin, profitConfidence } = enhancedProfit;
+    const { achievablePrice, netSellingPrice, profit, profitMargin, profitConfidence } = enhancedProfit;
     
     const trends = analyzePriceTrends(apiData);
     const liquidity = assessLiquidity(apiData);
@@ -582,7 +582,7 @@ function analyzeItemOpportunity(currentPrice, apiData, minProfit, minProfitMargi
     
     return {
         currentPrice,
-        predictedSellingPrice: parseFloat(predictedSellingPrice.toFixed(2)),
+        predictedSellingPrice: parseFloat(achievablePrice.toFixed(2)),
         netSellingPrice: parseFloat(netSellingPrice.toFixed(2)),
         profit: parseFloat(profit.toFixed(2)),
         profitMargin: parseFloat(profitMargin.toFixed(2)),
@@ -596,7 +596,7 @@ function analyzeItemOpportunity(currentPrice, apiData, minProfit, minProfitMargi
         recommendation,
         recommendationReason: recommendationReason.join(', '),
         volatility7d: parseFloat(volatility7d.toFixed(2)),
-        feeAmount: parseFloat((predictedSellingPrice * SKINPORT_FEE).toFixed(2)),
+        feeAmount: parseFloat((achievablePrice * SKINPORT_FEE).toFixed(2)),
         netProfitAfterFees: parseFloat(profit.toFixed(2)),
         enhancedFactors: enhancedProfit.factors
     };
