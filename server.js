@@ -404,7 +404,18 @@ app.post('/analyze-prices', async (req, res) => {
                     dataSource: priceData === salesData.last_24_hours ? '24h' : 
                                priceData === salesData.last_7_days ? '7d' : 
                                priceData === salesData.last_30_days ? '30d' : '90d',
-                    lastSaleDate: 'Recent' // Aggregated data doesn't have specific dates
+                    lastSaleDate: 'Recent', // Aggregated data doesn't have specific dates
+                    
+                    // Properties expected by content script
+                    profit: profitAmount,
+                    profitConfidence: Math.min(95, 50 + (volume * 2)), // Higher confidence with more volume
+                    riskLevel: volume < 3 ? 'HIGH' : volume < 10 ? 'MEDIUM' : 'LOW',
+                    liquidity: {
+                        rating: volume < 5 ? 'POOR' : volume < 20 ? 'MEDIUM' : 'GOOD',
+                        volume: volume
+                    },
+                    recommendation: profitPercentage > 20 ? 'STRONG_BUY' : 
+                                   profitPercentage > 10 ? 'BUY' : 'CONSIDER'
                 });
                 
                 console.log(`[Profit] Found profitable item: ${itemName} - €${profitAmount.toFixed(2)} (${profitPercentage.toFixed(1)}%)`);
