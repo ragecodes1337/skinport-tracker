@@ -12,8 +12,16 @@ const cache = new NodeCache({ stdTTL: 300, checkperiod: 120 });
 
 // Skinport API Constants
 const SKINPORT_API_URL = 'https://api.skinport.com/v1';
+const SKINPORT_API_KEY = process.env.SKINPORT_API_KEY; // Add API key support
 const APP_ID_CSGO = 730;
 const SKINPORT_FEE = 0.08; // 8% seller fee
+
+// Steam Community Market API (backup)
+const STEAM_API_URL = 'https://steamcommunity.com/market/priceoverview';
+const STEAM_FEE = 0.15; // 15% Steam fee
+
+// CSFloat API (alternative backup)
+const CSFLOAT_API_URL = 'https://csfloat.com/api/v1';
 
 // Rate limiting configuration - Skinport allows 8 requests per 5 minutes
 const RATE_LIMIT_WINDOW = 5 * 60 * 1000; // 5 minutes in milliseconds
@@ -157,9 +165,9 @@ async function fetchSalesHistoryBatch(marketHashNames, currency) {
         const response = await fetch(url, {
             method: 'GET',
             headers: {
-                'Accept-Encoding': 'br',
+                'Accept-Encoding': 'gzip, deflate, br',
                 'Accept': 'application/json',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
             }
         });
         
@@ -219,6 +227,95 @@ async function fetchSalesHistoryBatch(marketHashNames, currency) {
         console.error(`[Data Collection] Error fetching batch sales history: ${error.message}`);
         return {};
     }
+}
+
+/**
+ * Fallback to Steam Community Market API when Skinport API fails
+ */
+async function fetchSteamMarketData(itemName) {
+    try {
+        const cacheKey = `steam_${itemName}`;
+        const cachedData = cache.get(cacheKey);
+        
+        if (cachedData) {
+            return cachedData;
+        }
+
+        const params = new URLSearchParams({
+            appid: APP_ID_CSGO,
+            currency: 3, // EUR
+            market_hash_name: itemName
+        });
+        
+        const url = `${STEAM_API_URL}?${params}`;
+        console.log(`[Steam API] Fetching: ${itemName}`);
+        
+        const response = await fetch(url);
+        
+        if (!response.ok) {
+            console.error(`[Steam API] Error ${response.status} for ${itemName}`);
+            return null;
+        }
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            // Convert Steam format to match our expected format
+            const steamData = {
+                market_hash_name: itemName,
+                last_7_days: {
+                    median: parseFloat(data.median_price?.replace(/[€$,]/g, '') || 0),
+                    volume: data.volume ? parseInt(data.volume.replace(/,/g, '')) : 0,
+                    min: parseFloat(data.lowest_price?.replace(/[€$,]/g, '') || 0),
+                    max: parseFloat(data.median_price?.replace(/[€$,]/g, '') || 0) * 1.2 // Estimate
+                },
+                last_30_days: {
+                    median: parseFloat(data.median_price?.replace(/[€$,]/g, '') || 0),
+                    volume: data.volume ? parseInt(data.volume.replace(/,/g, '')) * 4 : 0 // Estimate
+                }
+            };
+            
+            // Cache for 10 minutes
+            cache.set(cacheKey, steamData, 600);
+            return steamData;
+        }
+        
+        return null;
+        
+    } catch (error) {
+        console.error(`[Steam API] Error fetching ${itemName}: ${error.message}`);
+        return null;
+    }
+}
+
+/**
+ * Enhanced fetchSalesHistoryBatch with Steam API fallback
+ */
+async function fetchSalesHistoryBatchWithFallback(marketHashNames, currency) {
+    // First try Skinport API
+    const skinportData = await fetchSalesHistoryBatch(marketHashNames, currency);
+    
+    // If Skinport returns no data, try Steam API for each item
+    if (Object.keys(skinportData).length === 0 && marketHashNames.length > 0) {
+        console.log(`[Fallback] Skinport API returned no data, trying Steam API...`);
+        
+        const fallbackData = {};
+        
+        // Limit to first 5 items to avoid rate limiting
+        for (const itemName of marketHashNames.slice(0, 5)) {
+            const steamData = await fetchSteamMarketData(itemName);
+            if (steamData) {
+                fallbackData[itemName] = steamData;
+            }
+            // Small delay to avoid overwhelming Steam API
+            await delay(200);
+        }
+        
+        console.log(`[Fallback] Steam API returned ${Object.keys(fallbackData).length} items`);
+        return fallbackData;
+    }
+    
+    return skinportData;
 }
 
 /**
