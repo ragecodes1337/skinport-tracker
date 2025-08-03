@@ -43,6 +43,103 @@ function normalizeItemName(name) {
 }
 
 /**
+ * Float Value Intelligence - Parse and categorize float values for enhanced pricing
+ */
+function analyzeFloatValue(itemName, currentPrice) {
+    // Extract float value from item name (if present)
+    const floatMatch = itemName.match(/(\d+\.\d+)/);
+    const hasFloat = floatMatch !== null;
+    const floatValue = hasFloat ? parseFloat(floatMatch[1]) : null;
+    
+    if (!hasFloat || floatValue === null) {
+        return {
+            hasFloat: false,
+            floatValue: null,
+            floatTier: 'UNKNOWN',
+            floatMultiplier: 1.0,
+            floatAnalysis: 'No float value detected in item name'
+        };
+    }
+    
+    // Determine wear condition from item name
+    let wearCondition = 'UNKNOWN';
+    let baseFloatRanges = {};
+    
+    if (itemName.includes('Factory New')) {
+        wearCondition = 'FN';
+        baseFloatRanges = { min: 0.00, max: 0.07, optimal: 0.00, premium: 0.01 };
+    } else if (itemName.includes('Minimal Wear')) {
+        wearCondition = 'MW';
+        baseFloatRanges = { min: 0.07, max: 0.15, optimal: 0.07, premium: 0.08 };
+    } else if (itemName.includes('Field-Tested')) {
+        wearCondition = 'FT';
+        baseFloatRanges = { min: 0.15, max: 0.38, optimal: 0.15, premium: 0.20 };
+    } else if (itemName.includes('Well-Worn')) {
+        wearCondition = 'WW';
+        baseFloatRanges = { min: 0.38, max: 0.45, optimal: 0.38, premium: 0.40 };
+    } else if (itemName.includes('Battle-Scarred')) {
+        wearCondition = 'BS';
+        baseFloatRanges = { min: 0.45, max: 1.00, optimal: 0.45, premium: 0.50 };
+    }
+    
+    if (wearCondition === 'UNKNOWN') {
+        return {
+            hasFloat: true,
+            floatValue: floatValue,
+            floatTier: 'UNKNOWN_WEAR',
+            floatMultiplier: 1.0,
+            floatAnalysis: `Float ${floatValue} detected but wear condition unknown`
+        };
+    }
+    
+    // Calculate float percentile within wear range
+    const range = baseFloatRanges.max - baseFloatRanges.min;
+    const floatPosition = (floatValue - baseFloatRanges.min) / range;
+    
+    // Determine float tier and pricing multiplier
+    let floatTier, floatMultiplier, floatAnalysis;
+    
+    if (floatValue <= baseFloatRanges.premium) {
+        // Premium float (top 10-20% of wear range)
+        floatTier = 'PREMIUM';
+        floatMultiplier = wearCondition === 'FN' ? 1.15 : 
+                         wearCondition === 'MW' ? 1.12 : 
+                         wearCondition === 'FT' ? 1.08 : 1.05;
+        floatAnalysis = `Premium ${wearCondition} float (${floatValue}) - expect ${((floatMultiplier - 1) * 100).toFixed(0)}% price premium`;
+    } else if (floatPosition <= 0.3) {
+        // Good float (bottom 30% of wear range)
+        floatTier = 'GOOD';
+        floatMultiplier = wearCondition === 'FN' ? 1.08 : 
+                         wearCondition === 'MW' ? 1.06 : 
+                         wearCondition === 'FT' ? 1.04 : 1.02;
+        floatAnalysis = `Good ${wearCondition} float (${floatValue}) - expect ${((floatMultiplier - 1) * 100).toFixed(0)}% price bonus`;
+    } else if (floatPosition <= 0.7) {
+        // Average float (middle 40% of wear range)
+        floatTier = 'AVERAGE';
+        floatMultiplier = 1.0;
+        floatAnalysis = `Average ${wearCondition} float (${floatValue}) - standard pricing`;
+    } else {
+        // Poor float (top 30% of wear range)
+        floatTier = 'POOR';
+        floatMultiplier = wearCondition === 'FN' ? 0.92 : 
+                         wearCondition === 'MW' ? 0.94 : 
+                         wearCondition === 'FT' ? 0.96 : 0.98;
+        floatAnalysis = `Poor ${wearCondition} float (${floatValue}) - expect ${((1 - floatMultiplier) * 100).toFixed(0)}% price discount`;
+    }
+    
+    return {
+        hasFloat: true,
+        floatValue: floatValue,
+        wearCondition: wearCondition,
+        floatTier: floatTier,
+        floatMultiplier: floatMultiplier,
+        floatPosition: floatPosition,
+        floatAnalysis: floatAnalysis,
+        floatRanges: baseFloatRanges
+    };
+}
+
+/**
  * Multi-timeframe analysis with RECENT-FIRST priority for accurate market pricing
  */
 function analyzeMultiTimeframe(salesData) {
@@ -164,7 +261,7 @@ function analyzeMultiTimeframe(salesData) {
 /**
  * Smart achievable price calculation using actual sales data
  */
-function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData, currentMinPrice) {
+function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData, currentMinPrice, floatAnalysis = null) {
     if (!multiTimeframeData || !multiTimeframeData.bestTimeframe) {
         // Fallback to simple competitive pricing
         return {
@@ -220,6 +317,15 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
         basePrice = (recentMarketAvg * recentWeight) + (currentMinPrice * 0.95 * (1 - recentWeight));
         strategy = 'RECENT_HYBRID';
         reasoning = `Balanced pricing based on recent ${bestPeriod} data`;
+    }
+    
+    // Apply Float Value Intelligence adjustment
+    if (floatAnalysis && floatAnalysis.hasFloat && floatAnalysis.floatMultiplier !== 1.0) {
+        const preFloatPrice = basePrice;
+        basePrice *= floatAnalysis.floatMultiplier;
+        reasoning += `, float-adjusted (${floatAnalysis.floatTier}: ${floatAnalysis.floatMultiplier}x from €${preFloatPrice.toFixed(2)} to €${basePrice.toFixed(2)})`;
+        
+        console.log(`[Float Pricing] Applied ${floatAnalysis.floatTier} float multiplier (${floatAnalysis.floatMultiplier}x): €${preFloatPrice.toFixed(2)} → €${basePrice.toFixed(2)}`);
     }
     
     // Adjust for trend
@@ -340,10 +446,17 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
             weeklyVolume: weeklyVolume
         },
         marketContext: {
-            listingVsSalesRatio: listingVsSalesRatio.toFixed(2),
+            listingVsSalesRatio: listingVsRecentRatio.toFixed(2),
             trend,
             velocityCategory: velocityCategory,
-            liquidityMargin: (minProfitMargin * 100).toFixed(1) + '%'
+            liquidityMargin: (minProfitMargin * 100).toFixed(1) + '%',
+            floatIntelligence: floatAnalysis ? {
+                hasFloat: floatAnalysis.hasFloat,
+                floatValue: floatAnalysis.floatValue,
+                floatTier: floatAnalysis.floatTier,
+                floatMultiplier: floatAnalysis.floatMultiplier,
+                wearCondition: floatAnalysis.wearCondition
+            } : null
         }
     };
 }
@@ -1064,8 +1177,21 @@ app.post('/analyze-prices', async (req, res) => {
             // SMART ACHIEVABLE PRICE: Use actual sales data for realistic pricing
             const skinportBuyPrice = typeof itemPrice === 'number' ? itemPrice : parseFloat(itemPrice.toString().replace(',', '.'));
             
+            // Float Value Intelligence Analysis
+            const floatAnalysis = analyzeFloatValue(normalizedName, skinportBuyPrice);
+            console.log(`[Float Intelligence] ${normalizedName}: ${floatAnalysis.floatAnalysis}`);
+            
+            // Apply float-adjusted expectations to minimum price
+            const floatAdjustedMinPrice = currentMinPrice * floatAnalysis.floatMultiplier;
+            if (floatAnalysis.hasFloat && floatAnalysis.floatMultiplier !== 1.0) {
+                console.log(`[Float Intelligence] Float-adjusted competitive price: €${floatAdjustedMinPrice.toFixed(2)} (${floatAnalysis.floatTier} float: ${floatAnalysis.floatMultiplier}x)`);
+            }
+            
+            // Use float-adjusted competitive price for calculations
+            const workingMinPrice = floatAdjustedMinPrice;
+            
             // Calculate smart achievable price based on sales data
-            const smartPricing = calculateSmartAchievablePrice(skinportBuyPrice, marketData, multiTimeframeAnalysis, currentMinPrice);
+            const smartPricing = calculateSmartAchievablePrice(skinportBuyPrice, marketData, multiTimeframeAnalysis, workingMinPrice, floatAnalysis);
             
             // Handle market-rejected items (pricing exceeds market reality)
             if (smartPricing.achievablePrice === 0 || smartPricing.confidence === 'REJECTED') {
@@ -1084,8 +1210,12 @@ app.post('/analyze-prices', async (req, res) => {
             console.log(`  Strategy: ${smartPricing.strategy}`);
             console.log(`  Reasoning: ${smartPricing.reasoning}`);
             console.log(`  Buy Price: €${skinportBuyPrice.toFixed(2)}`);
+            if (floatAnalysis.hasFloat) {
+                console.log(`  Float Value: ${floatAnalysis.floatValue} (${floatAnalysis.wearCondition} ${floatAnalysis.floatTier})`);
+            }
             console.log(`  Achievable Price: €${achievableGrossPrice.toFixed(2)} → €${achievableNetPrice.toFixed(2)} net`);
             console.log(`  Profit: €${profitAmount.toFixed(2)} (${profitPercentage.toFixed(1)}%)`);
+            console.log(`  Confidence: ${smartPricing.confidence}`);
             
             // Skip items with no profit potential (should be rare now due to market reality checks)
             if (profitAmount <= 0) {
@@ -1213,6 +1343,16 @@ app.post('/analyze-prices', async (req, res) => {
                 grossAchievablePrice: achievableGrossPrice.toFixed(2), // What to list at before fees
                 profitAmount: profitAmount.toFixed(2),
                 profitPercentage: profitPercentage.toFixed(1),
+                
+                // Float Value Intelligence
+                floatIntelligence: floatAnalysis.hasFloat ? {
+                    floatValue: floatAnalysis.floatValue,
+                    wearCondition: floatAnalysis.wearCondition,
+                    floatTier: floatAnalysis.floatTier,
+                    floatMultiplier: floatAnalysis.floatMultiplier,
+                    floatAnalysis: floatAnalysis.floatAnalysis,
+                    floatPosition: floatAnalysis.floatPosition ? (floatAnalysis.floatPosition * 100).toFixed(1) + '%' : null
+                } : null,
                 
                 // Confidence and market analysis with color coding
                 confidence: overallConfidence.level,
