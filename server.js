@@ -575,7 +575,24 @@ app.post('/analyze-prices', async (req, res) => {
             // For 7-10 day trading, we need much stricter volatility control
             const isDangerouslyVolatile = coefficientOfVariation > 300; // Items like AWP Redline with 774% variance
             const isHighlyVolatile = coefficientOfVariation > 150;
-            const trendPenalty = trend === 'FALLING' ? 25 : trend === 'RISING' ? -5 : 0;
+            
+            // Calculate trend first for stability calculation
+            let trendIndicator = 'STABLE';
+            if (salesData.last_7_days && salesData.last_30_days) {
+                const recent7dAvg = salesData.last_7_days.avg;
+                const older30dAvg = salesData.last_30_days.avg;
+                const trendChange = ((recent7dAvg - older30dAvg) / older30dAvg) * 100;
+                
+                if (trendChange > 10) {
+                    trendIndicator = 'RISING';
+                } else if (trendChange < -10) {
+                    trendIndicator = 'FALLING';
+                }
+                
+                console.log(`[Trend] ${itemName}: ${trendChange.toFixed(1)}% change, trend=${trendIndicator}`);
+            }
+            
+            const trendPenalty = trendIndicator === 'FALLING' ? 25 : trendIndicator === 'RISING' ? -5 : 0;
             
             if (isDangerouslyVolatile) {
                 // Auto-reject items with extreme volatility for short-term trading
@@ -777,23 +794,7 @@ app.post('/analyze-prices', async (req, res) => {
             //     adjustedMinPercentage *= 1.15; // Require 15% higher percentage
             // }
             
-            // Market trend analysis for additional validation
-            let trendIndicator = 'STABLE';
-            if (salesData.last_7_days && salesData.last_30_days) {
-                const recent7dAvg = salesData.last_7_days.avg;
-                const older30dAvg = salesData.last_30_days.avg;
-                const trendChange = ((recent7dAvg - older30dAvg) / older30dAvg) * 100;
-                
-                if (trendChange > 10) {
-                    trendIndicator = 'RISING';
-                } else if (trendChange < -10) {
-                    trendIndicator = 'FALLING';
-                    // COMMENTED OUT - Be extra cautious with falling trends
-                    // adjustedMinPercentage *= 1.2;
-                }
-                
-                console.log(`[Trend] ${itemName}: ${trendChange.toFixed(1)}% change, trend=${trendIndicator}`);
-            }
+            // Market trend analysis for additional validation (trend already calculated above)
 
             // WEEKLY FLIP ANALYSIS - 3-7 Day Strategy for Best Accuracy & Sales
             const weeklyFlipViability = analyzeWeeklyFlipViability(itemName, priceData, salesData, trendIndicator, priceStability);
