@@ -388,16 +388,51 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
         selectedPeriod = recent24hAvg ? '24h' : recent7dAvg ? '7d' : bestPeriod;
     }
     
-    // CRITICAL CHECK: If our minimum profitable price exceeds market reality, REJECT immediately
-    const marketTolerance = recentMarketAvg * 1.08; // Max 108% of recent sales average
+    // VOLATILITY-BASED MARKET TOLERANCE: Stricter limits for volatile items
+    const salesVolatility = ((salesMax - salesMin) / salesAvg) * 100;
+    let marketToleranceMultiplier;
+    let volatilityCategory;
     
+    if (salesVolatility > 200) {
+        // EXTREME VOLATILITY (200%+): Auto-reject or use recent minimum only
+        console.log(`[EXTREME VOLATILITY REJECTION] ${salesVolatility.toFixed(1)}% volatility exceeds 200% limit - TOO RISKY`);
+        return {
+            achievablePrice: 0,
+            confidence: 'REJECTED',
+            strategy: 'EXTREME_VOLATILITY',
+            reasoning: `Extreme volatility (${salesVolatility.toFixed(1)}%) - market too unpredictable for safe trading`
+        };
+    } else if (salesVolatility > 100) {
+        // VERY HIGH VOLATILITY (100-200%): Use recent minimum + tiny margin only
+        marketToleranceMultiplier = Math.max(salesMin * 1.02 / recentMarketAvg, 1.01); // Max 102% of recent min
+        volatilityCategory = 'VERY_HIGH_VOLATILITY';
+        console.log(`[HIGH VOLATILITY WARNING] ${salesVolatility.toFixed(1)}% volatility - using conservative tolerance`);
+    } else if (salesVolatility > 50) {
+        // HIGH VOLATILITY (50-100%): Stricter tolerance
+        marketToleranceMultiplier = 1.02; // Max 102% of recent average
+        volatilityCategory = 'HIGH_VOLATILITY';
+    } else if (salesVolatility > 20) {
+        // MODERATE VOLATILITY (20-50%): Slightly stricter
+        marketToleranceMultiplier = 1.05; // Max 105% of recent average
+        volatilityCategory = 'MODERATE_VOLATILITY';
+    } else {
+        // LOW VOLATILITY (≤20%): Standard tolerance
+        marketToleranceMultiplier = 1.08; // Max 108% of recent average
+        volatilityCategory = 'LOW_VOLATILITY';
+    }
+    
+    const marketTolerance = recentMarketAvg * marketToleranceMultiplier;
+    
+    console.log(`[Volatility Analysis] ${salesVolatility.toFixed(1)}% volatility (${volatilityCategory}) - tolerance: ${(marketToleranceMultiplier * 100).toFixed(1)}% of recent avg`);
+    
+    // CRITICAL CHECK: If our minimum profitable price exceeds market reality, REJECT immediately
     if (minProfitablePrice > marketTolerance) {
-        console.log(`[PROFITABILITY REJECTION] Minimum profit €${minProfitablePrice.toFixed(2)} exceeds market tolerance €${marketTolerance.toFixed(2)} (108% of €${recentMarketAvg.toFixed(2)} ${selectedPeriod} avg) - IMPOSSIBLE PROFIT`);
+        console.log(`[PROFITABILITY REJECTION] Minimum profit €${minProfitablePrice.toFixed(2)} exceeds market tolerance €${marketTolerance.toFixed(2)} (${(marketToleranceMultiplier * 100).toFixed(1)}% of €${recentMarketAvg.toFixed(2)} ${selectedPeriod} avg) - IMPOSSIBLE PROFIT`);
         return {
             achievablePrice: 0, // Signal rejection
             confidence: 'REJECTED',
             strategy: 'PROFIT_IMPOSSIBLE',
-            reasoning: `Minimum ${(minProfitMargin*100).toFixed(1)}% margin (€${minProfitablePrice.toFixed(2)}) exceeds market reality (€${marketTolerance.toFixed(2)} max)`
+            reasoning: `Minimum ${(minProfitMargin*100).toFixed(1)}% margin (€${minProfitablePrice.toFixed(2)}) exceeds ${volatilityCategory.toLowerCase()} market tolerance (€${marketTolerance.toFixed(2)} max)`
         };
     }
     
@@ -504,155 +539,172 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
 }
 
 /**
- * PROFIT-BASED confidence calculation with stability and color-coding support
+ * DUAL-CRITERIA confidence calculation: GREEN requires BOTH profitability AND liquidity
  */
 function calculateOverallConfidence(marketData, multiTimeframeData, smartPricing, salesVolume, currentQuantity) {
-    let score = 0;
     const factors = [];
     
-    // Extract profit information from smart pricing
+    // Extract market data for dual-criteria analysis
+    const achievablePrice = smartPricing.achievablePrice;
     const isStableItem = smartPricing.marketContext?.isStableItem || false;
     const velocityCategory = smartPricing.marketContext?.velocityCategory || 'UNKNOWN';
     const minProfitRequired = smartPricing.marketContext?.minProfitRequired || 0;
-    const achievablePrice = smartPricing.achievablePrice;
     
-    // Calculate actual profit margins achieved
+    // Calculate actual profit margins
     const netPrice = achievablePrice * (1 - SKINPORT_FEE);
-    const buyPrice = minProfitRequired / (1 + parseFloat(smartPricing.marketContext?.liquidityMargin || '2%') / 100) * (1 - SKINPORT_FEE); // Reverse calculate
+    const buyPrice = minProfitRequired / (1 + parseFloat(smartPricing.marketContext?.liquidityMargin || '2%') / 100) * (1 - SKINPORT_FEE);
     const actualProfit = netPrice - buyPrice;
     const actualMarginPercent = (actualProfit / buyPrice) * 100;
     
-    // Recent data quality (30% of confidence) - Recent timeframes are important
-    const recentDataQuality = multiTimeframeData.recentDataQuality;
-    const bestPeriod = multiTimeframeData.bestTimeframe.period;
-    
-    // CRITICAL: Check for zero recent activity - major confidence penalty
+    // Get recent activity data
     const recent24hVolume = multiTimeframeData.allTimeframes.find(t => t.period === '24h')?.data.volume || 0;
     const recent7dVolume = multiTimeframeData.allTimeframes.find(t => t.period === '7d')?.data.volume || 0;
-    
-    if (recent24hVolume === 0 && recent7dVolume === 0) {
-        // NO recent activity at all - this should never be green/high confidence
-        score += 5; // Very low score for recent data
-        factors.push('NO recent activity (0 sales in 24h/7d) - HIGH RISK');
-    } else if (recentDataQuality === 'EXCELLENT' && salesVolume >= 8) {
-        score += 30;
-        factors.push('Excellent recent data (24h, 8+ sales)');
-    } else if (recentDataQuality === 'EXCELLENT' && salesVolume >= 3) {
-        score += 27;
-        factors.push('Excellent recent data (24h, 3+ sales)');
-    } else if (recentDataQuality === 'GOOD' && salesVolume >= 5) {
-        score += 25;
-        factors.push('Good recent data (7d, 5+ sales)');
-    } else if (recentDataQuality === 'GOOD' && salesVolume >= 2) {
-        score += 20;
-        factors.push('Good recent data (7d, 2+ sales)');
-    } else if (bestPeriod === '30d' && salesVolume >= 10) {
-        score += 15;
-        factors.push('Monthly data fallback (10+ sales)');
-    } else if (salesVolume >= 1) {
-        score += 10;
-        factors.push('Limited recent data');
-    } else {
-        score += 5;
-        factors.push('Very limited data');
-    }
-    
-    // PROFIT MARGIN QUALITY (40% of confidence) - This is now the primary factor
-    if (actualMarginPercent >= 20) {
-        score += 40;
-        factors.push(`Excellent profit margin (${actualMarginPercent.toFixed(1)}%)`);
-    } else if (actualMarginPercent >= 15) {
-        score += 35;
-        factors.push(`High profit margin (${actualMarginPercent.toFixed(1)}%)`);
-    } else if (actualMarginPercent >= 10) {
-        score += 30;
-        factors.push(`Good profit margin (${actualMarginPercent.toFixed(1)}%)`);
-    } else if (actualMarginPercent >= 8) {
-        score += 25;
-        factors.push(`Moderate profit margin (${actualMarginPercent.toFixed(1)}%)`);
-    } else if (actualMarginPercent >= 5) {
-        score += 15;
-        factors.push(`Low profit margin (${actualMarginPercent.toFixed(1)}%)`);
-    } else if (actualMarginPercent >= 2) {
-        score += 10;
-        factors.push(`Very low profit margin (${actualMarginPercent.toFixed(1)}%)`);
-    } else {
-        score += 5;
-        factors.push(`Minimal profit margin (${actualMarginPercent.toFixed(1)}%)`);
-    }
-    
-    // STABILITY BONUS (20% of confidence) - Stable items get significant boost
-    if (isStableItem && velocityCategory.includes('STABLE')) {
-        score += 20;
-        factors.push('STABLE item - reliable quick flip potential');
-    } else if (isStableItem) {
-        score += 15;
-        factors.push('Stable pricing - good reliability');
-    } else if (velocityCategory === 'HIGH_VELOCITY') {
-        score += 12;
-        factors.push('High velocity - fast turnover');
-    } else if (velocityCategory === 'MEDIUM_VELOCITY') {
-        score += 8;
-        factors.push('Medium velocity - decent turnover');
-    } else {
-        score += 5;
-        factors.push('Low velocity - slower turnover');
-    }
-    
-    // Market liquidity (10% of confidence) - Simplified
-    if (currentQuantity >= 3 && currentQuantity <= 30 && salesVolume >= 3) {
-        score += 10;
-        factors.push('Good market liquidity');
-    } else if (currentQuantity >= 1 && salesVolume >= 1) {
-        score += 6;
-        factors.push('Adequate market liquidity');
-    } else {
-        score += 3;
-        factors.push('Limited market liquidity');
-    }
-    
-    // Determine confidence level with PROFIT-BASED color coding
-    let confidenceLevel, colorCode, stabilityRating;
-    
-    // CRITICAL: Never allow green for items with no recent activity
     const hasRecentActivity = recent24hVolume > 0 || recent7dVolume > 0;
     
-    // PROFIT-FIRST COLOR CODING SYSTEM
-    if (actualMarginPercent >= 15 && score >= 60 && hasRecentActivity && isStableItem) {
-        confidenceLevel = 'HIGH';
-        colorCode = 'GREEN'; // 15%+ margin + stable + recent activity = EXCELLENT
-        stabilityRating = 'STABLE_PROFITABLE';
-        factors.push('GREEN: High margin stable item with recent activity');
-    } else if (actualMarginPercent >= 10 && score >= 50 && hasRecentActivity) {
-        confidenceLevel = 'MEDIUM';
-        colorCode = 'ORANGE'; // 10%+ margin + decent score + recent activity = GOOD
-        stabilityRating = isStableItem ? 'STABLE_MODERATE' : 'MODERATE_PROFITABLE';
-        factors.push('ORANGE: Good margin item with recent activity');
-    } else if (actualMarginPercent >= 8 && hasRecentActivity) {
-        confidenceLevel = 'MEDIUM';
-        colorCode = 'ORANGE'; // 8%+ margin (stable item threshold) = ACCEPTABLE
-        stabilityRating = 'ACCEPTABLE_PROFIT';
-        factors.push('ORANGE: Acceptable margin for quick flip');
+    // DUAL-CRITERIA SCORING SYSTEM
+    
+    // CRITERION 1: PROFITABILITY SCORE (0-100)
+    let profitabilityScore = 0;
+    
+    if (actualMarginPercent >= 15) {
+        profitabilityScore = 100;
+        factors.push(`Excellent profit potential (${actualMarginPercent.toFixed(1)}%)`);
+    } else if (actualMarginPercent >= 12) {
+        profitabilityScore = 85;
+        factors.push(`High profit potential (${actualMarginPercent.toFixed(1)}%)`);
+    } else if (actualMarginPercent >= 10) {
+        profitabilityScore = 75;
+        factors.push(`Good profit potential (${actualMarginPercent.toFixed(1)}%)`);
+    } else if (actualMarginPercent >= 8) {
+        profitabilityScore = 60;
+        factors.push(`Moderate profit potential (${actualMarginPercent.toFixed(1)}%)`);
+    } else if (actualMarginPercent >= 5) {
+        profitabilityScore = 40;
+        factors.push(`Low profit potential (${actualMarginPercent.toFixed(1)}%)`);
+    } else if (actualMarginPercent >= 2) {
+        profitabilityScore = 20;
+        factors.push(`Very low profit potential (${actualMarginPercent.toFixed(1)}%)`);
     } else {
-        confidenceLevel = 'LOW';
-        colorCode = 'RED'; // <8% margin OR no recent activity = AVOID
-        stabilityRating = 'HIGH_RISK';
-        
-        if (!hasRecentActivity) {
-            factors.push('RED: NO RECENT SALES - avoid completely');
-        } else if (actualMarginPercent < 8) {
-            factors.push(`RED: Low margin (${actualMarginPercent.toFixed(1)}%) - high risk`);
+        profitabilityScore = 10;
+        factors.push(`Minimal profit potential (${actualMarginPercent.toFixed(1)}%)`);
+    }
+    
+    // Profitability bonus for stable items (easier to achieve target margins)
+    if (isStableItem) {
+        profitabilityScore = Math.min(profitabilityScore + 10, 100);
+        factors.push('Stable item - profit more reliable');
+    }
+    
+    // CRITERION 2: LIQUIDITY SCORE (0-100)
+    let liquidityScore = 0;
+    
+    // Recent activity is critical for liquidity
+    if (!hasRecentActivity) {
+        liquidityScore = 10; // Maximum 10% if no recent sales
+        factors.push('NO recent sales - poor liquidity');
+    } else {
+        // Base liquidity from recent volume
+        if (recent24hVolume >= 3) {
+            liquidityScore = 90; // Excellent daily activity
+            factors.push(`Excellent daily liquidity (${recent24hVolume} sales/24h)`);
+        } else if (recent24hVolume >= 1) {
+            liquidityScore = 75; // Good daily activity
+            factors.push(`Good daily liquidity (${recent24hVolume} sales/24h)`);
+        } else if (recent7dVolume >= 5) {
+            liquidityScore = 70; // Good weekly activity
+            factors.push(`Good weekly liquidity (${recent7dVolume} sales/7d)`);
+        } else if (recent7dVolume >= 3) {
+            liquidityScore = 60; // Moderate weekly activity
+            factors.push(`Moderate weekly liquidity (${recent7dVolume} sales/7d)`);
+        } else if (recent7dVolume >= 1) {
+            liquidityScore = 40; // Low weekly activity
+            factors.push(`Low weekly liquidity (${recent7dVolume} sales/7d)`);
         } else {
-            factors.push('RED: High risk factors detected');
+            liquidityScore = 20; // Very low activity
+            factors.push('Very low recent liquidity');
         }
+        
+        // Velocity category bonus
+        if (velocityCategory.includes('HIGH_VELOCITY')) {
+            liquidityScore = Math.min(liquidityScore + 10, 100);
+            factors.push('High velocity market - fast turnover');
+        } else if (velocityCategory.includes('STABLE')) {
+            liquidityScore = Math.min(liquidityScore + 15, 100);
+            factors.push('Stable market - predictable liquidity');
+        }
+        
+        // Market quantity factor (not too many, not too few)
+        if (currentQuantity >= 5 && currentQuantity <= 20) {
+            liquidityScore = Math.min(liquidityScore + 5, 100);
+            factors.push('Optimal market supply');
+        } else if (currentQuantity > 30) {
+            liquidityScore = Math.max(liquidityScore - 10, 10);
+            factors.push('Oversupplied market - harder to sell');
+        } else if (currentQuantity < 2) {
+            liquidityScore = Math.max(liquidityScore - 5, 10);
+            factors.push('Limited market supply');
+        }
+    }
+    
+    // Apply volatility penalty to liquidity score
+    const salesData = smartPricing.salesData;
+    if (salesData) {
+        const salesVolatility = ((salesData.max - salesData.min) / salesData.avg) * 100;
+        if (salesVolatility > 100) {
+            liquidityScore = Math.max(liquidityScore - 20, 10);
+            factors.push(`High volatility (${salesVolatility.toFixed(1)}%) - unpredictable liquidity`);
+        } else if (salesVolatility > 50) {
+            liquidityScore = Math.max(liquidityScore - 10, 10);
+            factors.push(`Moderate volatility (${salesVolatility.toFixed(1)}%) - variable liquidity`);
+        }
+    }
+    
+    // DUAL-CRITERIA COLOR CODING SYSTEM
+    let confidenceLevel, colorCode, stabilityRating;
+    const overallScore = Math.round((profitabilityScore + liquidityScore) / 2);
+    
+    // GREEN: Both criteria must be strong (80+ profitability AND 60+ liquidity)
+    if (profitabilityScore >= 80 && liquidityScore >= 60) {
+        confidenceLevel = 'HIGH';
+        colorCode = 'GREEN';
+        stabilityRating = 'DUAL_CRITERIA_EXCELLENT';
+        factors.push(`GREEN: Both profitable (${profitabilityScore}/100) AND liquid (${liquidityScore}/100)`);
+    }
+    // ORANGE: Either strong profitability OR good liquidity
+    else if (profitabilityScore >= 60 || liquidityScore >= 50) {
+        confidenceLevel = 'MEDIUM';
+        colorCode = 'ORANGE';
+        if (profitabilityScore >= 60 && liquidityScore < 50) {
+            stabilityRating = 'PROFITABLE_BUT_ILLIQUID';
+            factors.push(`ORANGE: Good profit (${profitabilityScore}/100) but poor liquidity (${liquidityScore}/100)`);
+        } else if (liquidityScore >= 50 && profitabilityScore < 60) {
+            stabilityRating = 'LIQUID_BUT_LOW_PROFIT';
+            factors.push(`ORANGE: Good liquidity (${liquidityScore}/100) but low profit (${profitabilityScore}/100)`);
+        } else {
+            stabilityRating = 'MODERATE_BOTH';
+            factors.push(`ORANGE: Moderate in both criteria - P:${profitabilityScore}/100, L:${liquidityScore}/100`);
+        }
+    }
+    // RED: Neither criteria met sufficiently
+    else {
+        confidenceLevel = 'LOW';
+        colorCode = 'RED';
+        stabilityRating = 'HIGH_RISK';
+        factors.push(`RED: Poor profitability (${profitabilityScore}/100) AND liquidity (${liquidityScore}/100)`);
     }
     
     return {
         level: confidenceLevel,
-        score: Math.round(score),
+        score: overallScore,
         factors,
         colorCode,
         stabilityRating,
+        dualCriteriaScores: {
+            profitabilityScore,
+            liquidityScore,
+            profitMargin: actualMarginPercent.toFixed(1) + '%',
+            recentActivity: `${recent24hVolume}/24h, ${recent7dVolume}/7d`
+        },
         profitMetrics: {
             actualMarginPercent: actualMarginPercent.toFixed(1),
             isStableItem,
@@ -660,8 +712,8 @@ function calculateOverallConfidence(marketData, multiTimeframeData, smartPricing
             hasRecentActivity
         },
         marketMetrics: {
-            recentDataQuality,
-            dataTimeframe: bestPeriod
+            recentDataQuality: multiTimeframeData.recentDataQuality,
+            dataTimeframe: multiTimeframeData.bestTimeframe.period
         }
     };
 }
