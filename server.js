@@ -270,12 +270,16 @@ app.post('/analyze-prices', async (req, res) => {
     console.log(`[Backend] Sample items:`, items.slice(0, 3));
     
     // Debug StatTrak items specifically
-    const statTrakItems = items.filter(item => item.name && item.name.includes('StatTrak'));
+    const statTrakItems = items.filter(item => {
+        const itemName = item.marketHashName || item.name;
+        return itemName && itemName.includes('StatTrak');
+    });
     if (statTrakItems.length > 0) {
         console.log(`[StatTrak Debug] Found ${statTrakItems.length} StatTrak items:`);
         statTrakItems.slice(0, 3).forEach(item => {
-            console.log(`  - Name: "${item.name}"`);
-            console.log(`  - Unicode chars: ${Array.from(item.name).map(c => `${c}(${c.charCodeAt(0)})`).join(' ')}`);
+            const itemName = item.marketHashName || item.name;
+            console.log(`  - Name: "${itemName}"`);
+            console.log(`  - Unicode chars: ${Array.from(itemName).map(c => `${c}(${c.charCodeAt(0)})`).join(' ')}`);
         });
     }
 
@@ -283,7 +287,7 @@ app.post('/analyze-prices', async (req, res) => {
         const analyzedItems = [];
         
         // Extract unique market hash names (item names)
-        const uniqueNames = [...new Set(items.map(item => item.name).filter(name => name && name.trim()))];
+        const uniqueNames = [...new Set(items.map(item => item.marketHashName || item.name).filter(name => name && name.trim()))];
         console.log(`[Backend] Extracted ${uniqueNames.length} unique item names.`);
 
         if (uniqueNames.length === 0) {
@@ -316,12 +320,13 @@ app.post('/analyze-prices', async (req, res) => {
         if (statTrakItems.length > 0) {
             console.log(`[StatTrak Debug] API Response check:`);
             statTrakItems.slice(0, 3).forEach(item => {
-                const hasData = allSalesData[item.name];
-                console.log(`  - "${item.name}": ${hasData ? 'HAS DATA' : 'NO DATA'}`);
+                const itemName = item.marketHashName || item.name;
+                const hasData = allSalesData[itemName];
+                console.log(`  - "${itemName}": ${hasData ? 'HAS DATA' : 'NO DATA'}`);
                 if (!hasData) {
                     // Check if a similar name exists in the response
                     const similarKeys = Object.keys(allSalesData).filter(key => 
-                        key.toLowerCase().includes(item.name.toLowerCase().replace(/[★™]/g, '').trim())
+                        key.toLowerCase().includes(itemName.toLowerCase().replace(/[★™]/g, '').trim())
                     );
                     if (similarKeys.length > 0) {
                         console.log(`    Similar keys found: ${similarKeys.slice(0, 2)}`);
@@ -332,11 +337,14 @@ app.post('/analyze-prices', async (req, res) => {
 
         // Analyze each item for profitability
         for (const item of items) {
-            if (!item.name || !item.skinportPrice) continue;
+            const itemName = item.marketHashName || item.name;
+            const itemPrice = item.price || item.skinportPrice;
+            
+            if (!itemName || !itemPrice) continue;
 
-            const salesData = allSalesData[item.name];
+            const salesData = allSalesData[itemName];
             if (!salesData) {
-                console.log(`[Backend] No sales data for: ${item.name}`);
+                console.log(`[Backend] No sales data for: ${itemName}`);
                 continue;
             }
 
@@ -349,7 +357,7 @@ app.post('/analyze-prices', async (req, res) => {
             const maxPrice = Math.max(...prices);
             
             // Calculate profit
-            const skinportPriceNum = parseFloat(item.skinportPrice.replace(',', '.'));
+            const skinportPriceNum = typeof itemPrice === 'number' ? itemPrice : parseFloat(itemPrice.toString().replace(',', '.'));
             const profitAmount = avgPrice - skinportPriceNum;
             const profitPercentage = ((profitAmount / skinportPriceNum) * 100);
 
@@ -360,6 +368,8 @@ app.post('/analyze-prices', async (req, res) => {
             if (profitAmount >= minProfitAmount && profitPercentage >= minProfitPercentage) {
                 analyzedItems.push({
                     ...item,
+                    name: itemName,
+                    skinportPrice: itemPrice,
                     steamAvgPrice: avgPrice.toFixed(2),
                     steamMinPrice: minPrice.toFixed(2),
                     steamMaxPrice: maxPrice.toFixed(2),
@@ -369,7 +379,7 @@ app.post('/analyze-prices', async (req, res) => {
                     lastSaleDate: salesData[0]?.date || 'Unknown'
                 });
                 
-                console.log(`[Profit] Found profitable item: ${item.name} - €${profitAmount.toFixed(2)} (${profitPercentage.toFixed(1)}%)`);
+                console.log(`[Profit] Found profitable item: ${itemName} - €${profitAmount.toFixed(2)} (${profitPercentage.toFixed(1)}%)`);
             }
         }
 
