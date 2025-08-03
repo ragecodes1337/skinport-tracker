@@ -477,18 +477,18 @@ app.post('/analyze-prices', async (req, res) => {
             const minProfitAmount = parseFloat(settings.minProfitAmount || 0);
             const minProfitPercentage = parseFloat(settings.minProfitPercentage || 0);
             
-            // Risk-adjusted profit requirements
+            // TEMPORARILY DISABLED - Risk-adjusted profit requirements for testing
             let adjustedMinProfit = minProfitAmount;
             let adjustedMinPercentage = minProfitPercentage;
             
-            // Increase minimum requirements for high-risk items
-            if (riskLevel === 'VERY_HIGH') {
-                adjustedMinProfit *= 1.5; // Require 50% more profit for very high risk
-                adjustedMinPercentage *= 1.3; // Require 30% higher percentage
-            } else if (riskLevel === 'HIGH') {
-                adjustedMinProfit *= 1.25; // Require 25% more profit for high risk
-                adjustedMinPercentage *= 1.15; // Require 15% higher percentage
-            }
+            // COMMENTED OUT - Increase minimum requirements for high-risk items
+            // if (riskLevel === 'VERY_HIGH') {
+            //     adjustedMinProfit *= 1.5; // Require 50% more profit for very high risk
+            //     adjustedMinPercentage *= 1.3; // Require 30% higher percentage
+            // } else if (riskLevel === 'HIGH') {
+            //     adjustedMinProfit *= 1.25; // Require 25% more profit for high risk
+            //     adjustedMinPercentage *= 1.15; // Require 15% higher percentage
+            // }
             
             // Market trend analysis for additional validation
             let trendIndicator = 'STABLE';
@@ -501,17 +501,20 @@ app.post('/analyze-prices', async (req, res) => {
                     trendIndicator = 'RISING';
                 } else if (trendChange < -10) {
                     trendIndicator = 'FALLING';
-                    // Be extra cautious with falling trends
-                    adjustedMinPercentage *= 1.2;
+                    // COMMENTED OUT - Be extra cautious with falling trends
+                    // adjustedMinPercentage *= 1.2;
                 }
                 
                 console.log(`[Trend] ${itemName}: ${trendChange.toFixed(1)}% change, trend=${trendIndicator}`);
             }
 
-            // Final profit validation with enhanced criteria
+            // RELAXED profit validation - only basic criteria for testing
             const meetsBasicCriteria = profitAmount >= adjustedMinProfit && profitPercentage >= adjustedMinPercentage;
-            const meetsConfidenceCriteria = profitConfidence >= 30; // Minimum confidence threshold
-            const meetsStabilityCriteria = priceStability >= 30; // Minimum price stability
+            const meetsConfidenceCriteria = profitConfidence >= 15; // Reduced from 30 to 15
+            const meetsStabilityCriteria = priceStability >= 15; // Reduced from 30 to 15
+            
+            console.log(`[Validation] ${itemName}: Profit=${profitAmount.toFixed(2)}, Percentage=${profitPercentage.toFixed(1)}%, Confidence=${profitConfidence}%, Stability=${priceStability}%`);
+            console.log(`[Validation] Criteria: Basic=${meetsBasicCriteria}, Confidence=${meetsConfidenceCriteria}, Stability=${meetsStabilityCriteria}`);
             
             if (meetsBasicCriteria && meetsConfidenceCriteria && meetsStabilityCriteria) {
                 analyzedItems.push({
