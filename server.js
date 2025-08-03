@@ -440,27 +440,27 @@ app.post('/analyze-prices', async (req, res) => {
             const hasRecentActivity = salesData.last_7_days && salesData.last_7_days.volume >= 3;
             const volumeConsistency = hasRecentActivity ? 'CONSISTENT' : 'SPORADIC';
             
-            // Determine liquidity rating with enhanced criteria
-            if (volume >= 20 && hasRecentActivity && priceStability > 60) {
+            // MUCH MORE RELAXED liquidity criteria to find more items
+            if (volume >= 5 && priceStability > 30) {
                 liquidityRating = 'GOOD';
                 achievablePrice = conservativePrice * 0.96; // 4% discount for quick sale
-                profitConfidence = Math.min(90, 60 + (priceStability * 0.3) + (volume * 0.8));
+                profitConfidence = Math.min(90, 50 + (priceStability * 0.4) + (volume * 2.0));
                 riskLevel = 'LOW';
-            } else if (volume >= 10 && priceStability > 50) {
+            } else if (volume >= 3 && priceStability > 20) {
                 liquidityRating = 'MEDIUM';
                 achievablePrice = conservativePrice * 0.93; // 7% discount
-                profitConfidence = Math.min(75, 40 + (priceStability * 0.3) + (volume * 1.2));
+                profitConfidence = Math.min(75, 35 + (priceStability * 0.4) + (volume * 3.0));
                 riskLevel = hasRecentActivity ? 'MEDIUM' : 'MEDIUM_HIGH';
-            } else if (volume >= 5 && priceStability > 40) {
+            } else if (volume >= 2 && priceStability > 15) {
                 liquidityRating = 'POOR';
                 achievablePrice = conservativePrice * 0.89; // 11% discount
-                profitConfidence = Math.min(60, 25 + (priceStability * 0.3) + (volume * 1.5));
+                profitConfidence = Math.min(60, 25 + (priceStability * 0.4) + (volume * 4.0));
                 riskLevel = 'HIGH';
             } else {
                 liquidityRating = 'VERY_POOR';
-                // For very risky items, use minimum price as ceiling
-                achievablePrice = Math.min(conservativePrice * 0.85, minPrice * 0.98);
-                profitConfidence = Math.min(40, 15 + (priceStability * 0.2) + (volume * 2));
+                // Even risky items can be profitable if price is right
+                achievablePrice = conservativePrice * 0.85;
+                profitConfidence = Math.min(50, 20 + (priceStability * 0.3) + (volume * 5.0));
                 riskLevel = 'VERY_HIGH';
             }
             
@@ -507,9 +507,9 @@ app.post('/analyze-prices', async (req, res) => {
                 console.log(`[Trend] ${itemName}: ${trendChange.toFixed(1)}% change, trend=${trendIndicator}`);
             }
 
-            // RELAXED profit validation - only basic criteria for testing
+            // RELAXED profit validation - much lower criteria for testing
             const meetsBasicCriteria = profitAmount >= adjustedMinProfit && profitPercentage >= adjustedMinPercentage;
-            const meetsConfidenceCriteria = profitConfidence >= 15; // Reduced from 30 to 15
+            const meetsConfidenceCriteria = profitConfidence >= 10; // Reduced from 15 to 10
             const meetsStabilityCriteria = true; // DISABLED stability requirement - was rejecting too many items
             
             console.log(`[Validation] ${itemName}: Profit=${profitAmount.toFixed(2)}, Percentage=${profitPercentage.toFixed(1)}%, Confidence=${profitConfidence}%, Stability=${priceStability}%`);
@@ -551,9 +551,9 @@ app.post('/analyze-prices', async (req, res) => {
                         consistency: volumeConsistency
                     },
                     recommendation: profitPercentage > 25 && liquidityRating === 'GOOD' && riskLevel === 'LOW' ? 'STRONG_BUY' : 
-                                   profitPercentage > 15 && liquidityRating !== 'VERY_POOR' && profitConfidence > 60 ? 'BUY' : 
-                                   profitPercentage > 10 && riskLevel !== 'VERY_HIGH' ? 'CONSIDER' :
-                                   liquidityRating === 'VERY_POOR' || riskLevel === 'VERY_HIGH' ? 'AVOID' : 'HOLD',
+                                   profitPercentage > 15 && liquidityRating !== 'VERY_POOR' && profitConfidence > 50 ? 'BUY' : 
+                                   profitPercentage > 8 ? 'CONSIDER' :
+                                   profitPercentage < 5 && volume < 2 && priceStability < 10 ? 'AVOID' : 'HOLD',
                     
                     // Additional metadata for debugging
                     analysis: {
