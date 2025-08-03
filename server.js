@@ -191,11 +191,11 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
         basePrice *= 0.99; // Minimal penalty from 0.97 (was 3% penalty, now 1%)
     }
     
-    // Ensure we don't price below break-even (reduced from 10% to 5% for better opportunities)
-    const minProfitablePrice = buyPrice * 1.05; // Minimum 5% markup before fees
+    // Ensure we don't price below break-even after fees (accounts for 8% Skinport fee)
+    const minProfitablePrice = buyPrice / (1 - SKINPORT_FEE); // Break-even after 8% fees
     if (basePrice < minProfitablePrice) {
         basePrice = minProfitablePrice;
-        reasoning += ', adjusted to minimum profitable price';
+        reasoning += ', adjusted to minimum profitable price after fees';
     }
     
     // Ensure we don't price way above what actually sells
