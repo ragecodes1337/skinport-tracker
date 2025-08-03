@@ -205,14 +205,45 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
         };
     }
     
-    // Sliding scale profit margins based on item value (realistic expectations)
+    // LIQUIDITY-BASED PROFIT MARGINS - Calculate sales velocity and adjust margins accordingly
+    const weeklyVolume = multiTimeframeData.allTimeframes.find(t => t.period === '7d')?.data.volume || 
+                        Math.max(salesVolume / 4, 1); // Estimate weekly volume or minimum 1
+    
     let minProfitMargin;
-    if (buyPrice < 50) {
-        minProfitMargin = 0.025; // 2.5% for small items
-    } else if (buyPrice < 200) {
-        minProfitMargin = 0.015; // 1.5% for medium items  
-    } else {
-        minProfitMargin = 0.008; // 0.8% for expensive items
+    let velocityCategory;
+    
+    // High velocity items (8+ sales/week) - Fast flips, lower margins acceptable
+    if (weeklyVolume >= 8) {
+        velocityCategory = 'HIGH_VELOCITY';
+        if (buyPrice < 20) {
+            minProfitMargin = 0.008; // 0.8% for small, fast-moving items
+        } else if (buyPrice < 100) {
+            minProfitMargin = 0.012; // 1.2% for medium, fast-moving items
+        } else {
+            minProfitMargin = 0.015; // 1.5% for expensive, fast-moving items
+        }
+    }
+    // Medium velocity items (2-7 sales/week) - Balanced approach
+    else if (weeklyVolume >= 2) {
+        velocityCategory = 'MEDIUM_VELOCITY';
+        if (buyPrice < 50) {
+            minProfitMargin = 0.020; // 2.0% for small, medium velocity items
+        } else if (buyPrice < 200) {
+            minProfitMargin = 0.025; // 2.5% for medium, medium velocity items
+        } else {
+            minProfitMargin = 0.020; // 2.0% for expensive, medium velocity items
+        }
+    }
+    // Low velocity items (<2 sales/week) - Higher margins needed to justify holding time
+    else {
+        velocityCategory = 'LOW_VELOCITY';
+        if (buyPrice < 30) {
+            minProfitMargin = 0.035; // 3.5% for small, slow-moving items
+        } else if (buyPrice < 150) {
+            minProfitMargin = 0.045; // 4.5% for medium, slow-moving items
+        } else {
+            minProfitMargin = 0.030; // 3.0% for expensive, slow-moving items
+        }
     }
     
     // Calculate minimum profitable price with realistic margins
@@ -229,12 +260,12 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
                 achievablePrice: 0, // Signal rejection
                 confidence: 'REJECTED',
                 strategy: 'PROFIT_IMPOSSIBLE',
-                reasoning: `Even ${(minProfitMargin*100).toFixed(1)}% margin (€${adjustedPrice.toFixed(2)}) exceeds market reality`
+                reasoning: `Even ${(minProfitMargin*100).toFixed(1)}% margin (€${adjustedPrice.toFixed(2)}) exceeds market reality [${velocityCategory}: ${weeklyVolume} sales/week]`
             };
         }
         
         basePrice = adjustedPrice;
-        reasoning += `, adjusted to minimum ${(minProfitMargin*100).toFixed(1)}% margin (€${(minProfitMargin*buyPrice).toFixed(2)} profit)`;
+        reasoning += `, adjusted to minimum ${(minProfitMargin*100).toFixed(1)}% margin (€${(minProfitMargin*buyPrice).toFixed(2)} profit) [${velocityCategory}: ${weeklyVolume} sales/week]`;
     }
     
     // Ensure we don't price way above what actually sells
@@ -253,11 +284,14 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
             avg: salesAvg,
             min: salesMin,
             max: salesMax,
-            volume: salesVolume
+            volume: salesVolume,
+            weeklyVolume: weeklyVolume
         },
         marketContext: {
             listingVsSalesRatio: listingVsSalesRatio.toFixed(2),
-            trend
+            trend,
+            velocityCategory: velocityCategory,
+            liquidityMargin: (minProfitMargin * 100).toFixed(1) + '%'
         }
     };
 }
