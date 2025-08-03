@@ -3,8 +3,42 @@ import express from 'express';
 import cors from 'cors';
 import fetch from 'node-fetch';
 import NodeCache from 'node-cache';
-
-const app = express();
+        const batchData = {};
+        if (Array.isArray(data)) {
+            console.log(`[API Response] Processing ${data.length} items from API`);
+            console.log(`[API Response] First 3 API item names:`, data.slice(0, 3).map(item => item.market_hash_name));
+            
+            data.forEach(item => {
+                if (item.market_hash_name) {
+                    batchData[item.market_hash_name] = item;
+                }
+            });
+            
+            // Debug StatTrak items specifically
+            const requestedStatTrak = validNames.filter(name => name.includes('StatTrak'));
+            const receivedStatTrak = Object.keys(batchData).filter(name => name.includes('StatTrak'));
+            
+            if (requestedStatTrak.length > 0) {
+                console.log(`[API Debug] StatTrak requested (${requestedStatTrak.length}):`, requestedStatTrak.slice(0, 3));
+                console.log(`[API Debug] StatTrak received (${receivedStatTrak.length}):`, receivedStatTrak.slice(0, 3));
+                
+                // Check for exact mismatches
+                requestedStatTrak.forEach(reqName => {
+                    if (!batchData[reqName]) {
+                        console.log(`[API Debug] MISSING StatTrak: Requested "${reqName}" but not found in API response`);
+                        
+                        // Try to find similar names
+                        const similarNames = Object.keys(batchData).filter(apiName => 
+                            apiName.includes('StatTrak') && 
+                            apiName.toLowerCase().includes(reqName.toLowerCase().split('|')[1]?.trim().split('(')[0]?.trim() || '')
+                        );
+                        if (similarNames.length > 0) {
+                            console.log(`[API Debug] Possible matches for "${reqName}":`, similarNames);
+                        }
+                    }
+                });
+            }
+        } app = express();
 const port = process.env.PORT || 3000;
 
 // Cache for API responses (5 minutes = 300 seconds, matching the Skinport cache)
@@ -199,11 +233,63 @@ async function fetchSalesHistoryBatch(marketHashNames, currency) {
         // Convert array response to object with market_hash_name as key
         const batchData = {};
         if (Array.isArray(data)) {
+            console.log(`[API Response] Processing ${data.length} items from API`);
+            console.log(`[API Response] First 3 API item names:`, data.slice(0, 3).map(item => item.market_hash_name));
+            
             data.forEach(item => {
                 if (item.market_hash_name) {
                     batchData[item.market_hash_name] = item;
                 }
             });
+            
+            // Debug: Show which requested items were found vs missing
+            console.log(`[API Response] Requested ${validNames.length} items, got ${Object.keys(batchData).length} responses`);
+            
+            const foundItems = Object.keys(batchData);
+            const missingItems = validNames.filter(name => !foundItems.includes(name));
+            
+            // Debug StatTrak items specifically
+            const requestedStatTrak = validNames.filter(name => name.includes('StatTrak'));
+            const receivedStatTrak = foundItems.filter(name => name.includes('StatTrak'));
+            
+            if (requestedStatTrak.length > 0) {
+                console.log(`[API Debug] StatTrak requested (${requestedStatTrak.length}):`, requestedStatTrak.slice(0, 3));
+                console.log(`[API Debug] StatTrak received (${receivedStatTrak.length}):`, receivedStatTrak.slice(0, 3));
+                
+                // Check for exact mismatches
+                const missingStatTrak = requestedStatTrak.filter(name => !foundItems.includes(name));
+                if (missingStatTrak.length > 0) {
+                    console.log(`[API Debug] Missing StatTrak items (${missingStatTrak.length}):`, missingStatTrak.slice(0, 3));
+                    
+                    // Try to find similar names in the API response for first missing item
+                    const firstMissing = missingStatTrak[0];
+                    const weaponPart = firstMissing.split('|')[1]?.trim().split('(')[0]?.trim();
+                    if (weaponPart) {
+                        const similarNames = foundItems.filter(apiName => 
+                            apiName.includes('StatTrak') && 
+                            apiName.toLowerCase().includes(weaponPart.toLowerCase())
+                        );
+                        if (similarNames.length > 0) {
+                            console.log(`[API Debug] Similar names for "${firstMissing}":`, similarNames);
+                        }
+                    }
+                }
+            }
+            
+            if (missingItems.length > 0) {
+                console.log(`[API Response] Missing items (${missingItems.length}):`, missingItems.slice(0, 5));
+                console.log(`[API Response] Example API names:`, foundItems.slice(0, 5));
+                
+                // Check for potential name mismatches
+                missingItems.slice(0, 3).forEach(missing => {
+                    const possibleMatch = foundItems.find(found => 
+                        found.toLowerCase().includes(missing.toLowerCase().replace('stattrak ', '').split(' ')[0])
+                    );
+                    if (possibleMatch) {
+                        console.log(`[API Response] Possible mismatch: "${missing}" vs "${possibleMatch}"`);
+                    }
+                });
+            }
         }
         
         // Cache the batch response
@@ -688,11 +774,13 @@ function calculateEnhancedProfit(currentPrice, apiData, settings = {}) {
     const { achievablePrice, metrics, factors } = priceData;
     const { vol7, v7, v24 } = metrics;
     
-    // Much more lenient sales volume requirements
-    const minSalesForPrice = currentPrice < 5 ? 5 :    // Very cheap items need 5 sales
-                            currentPrice < 20 ? 8 :    // Low-mid items need 8 sales  
-                            currentPrice < 100 ? 10 :  // Mid items need 10 sales
-                            12;                         // Expensive items need 12 sales
+    // Much more lenient sales volume requirements based on actual market conditions
+    const minSalesForPrice = currentPrice < 5 ? 3 :     // Very cheap items need 3 sales
+                            currentPrice < 20 ? 5 :     // Low-mid items need 5 sales  
+                            currentPrice < 50 ? 6 :     // Mid items need 6 sales
+                            currentPrice < 100 ? 7 :    // Higher mid items need 7 sales
+                            currentPrice < 500 ? 3 :    // Expensive items need only 3 sales (they trade less)
+                            1;                           // Very expensive items need only 1 sale
     
     if (v7 < minSalesForPrice) {
         console.log(`[Filter] REJECTED: Insufficient sales volume (${v7} < ${minSalesForPrice}) for €${currentPrice} item`);
@@ -706,16 +794,20 @@ function calculateEnhancedProfit(currentPrice, apiData, settings = {}) {
     const profit = netSellingPrice - effectiveCost;
     const profitMargin = (profit / effectiveCost) * 100;
 
-    // Much more relaxed profit requirements based on price tiers
-    const minProfitForPrice = currentPrice < 5 ? 0.50 :    // €0.50 for very cheap items
-                             currentPrice < 20 ? 1.50 :    // €1.50 for low-mid items
-                             currentPrice < 100 ? 3.00 :   // €3.00 for mid items  
-                             5.00;                          // €5.00 for expensive items
+    // Much more relaxed profit requirements based on current market conditions
+    const minProfitForPrice = currentPrice < 5 ? 0.25 :   // €0.25 for very cheap items
+                             currentPrice < 20 ? 0.50 :   // €0.50 for low-mid items
+                             currentPrice < 50 ? 1.00 :   // €1.00 for mid items
+                             currentPrice < 100 ? 2.00 :  // €2.00 for higher mid items  
+                             currentPrice < 500 ? 3.00 :  // €3.00 for expensive items
+                             5.00;                         // €5.00 for very expensive items
     
-    const minMarginForPrice = currentPrice < 5 ? 5 :       // 5% for very cheap items
-                             currentPrice < 20 ? 8 :       // 8% for low-mid items
-                             currentPrice < 100 ? 10 :     // 10% for mid items
-                             12;                            // 12% for expensive items
+    const minMarginForPrice = currentPrice < 5 ? 3 :      // 3% for very cheap items
+                             currentPrice < 20 ? 4 :      // 4% for low-mid items
+                             currentPrice < 50 ? 5 :      // 5% for mid items
+                             currentPrice < 100 ? 6 :     // 6% for higher mid items
+                             currentPrice < 500 ? 3 :     // 3% for expensive items (lower margin acceptable)
+                             2;                            // 2% for very expensive items
 
     // Use user settings if they're lower than our defaults (more permissive)
     const actualMinProfit = Math.min(settings.minProfit || minProfitForPrice, minProfitForPrice);
