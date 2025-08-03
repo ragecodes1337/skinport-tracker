@@ -138,10 +138,8 @@ async function fetchSalesHistoryBatch(marketHashNames, currency) {
     try {
         await waitForRateLimit();
         
-        // Properly encode market hash names
-        const marketHashNamesParam = validNames
-            .map(name => encodeURIComponent(name))
-            .join(',');
+        // Create comma-separated list of market hash names (URLSearchParams will handle encoding)
+        const marketHashNamesParam = validNames.join(',');
             
         const params = new URLSearchParams({
             app_id: APP_ID_CSGO,
