@@ -14,7 +14,7 @@ const cache = new NodeCache({ stdTTL: 300, checkperiod: 120 });
 const SKINPORT_API_URL = 'https://api.skinport.com/v1';
 const APP_ID_CSGO = 730;
 const SKINPORT_FEE = 0.08; // 8% seller fee
-const MINIMUM_PROFIT_THRESHOLD = 0.20; // Minimum €0.20 profit (lowered from €0.50 for more opportunities)
+const MINIMUM_PROFIT_THRESHOLD = 0.15; // Minimum €0.15 profit (lowered from €0.20 for more opportunities)
 
 // Rate limiting configuration - Skinport allows 8 requests per 5 minutes
 const RATE_LIMIT_WINDOW = 5 * 60 * 1000; // 5 minutes in milliseconds
@@ -178,17 +178,17 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
         reasoning += ', adjusted down for falling trend';
     }
     
-    // Adjust for volume (confidence factor)
-    if (salesVolume >= 20) {
+    // Adjust for volume (confidence factor) - REDUCED PENALTIES for more opportunities
+    if (salesVolume >= 10) { // Lowered from 20
         confidence = 'HIGH';
-    } else if (salesVolume >= 10) {
+    } else if (salesVolume >= 5) { // Lowered from 10
         confidence = 'MEDIUM';
     } else if (salesVolume >= 3) {
         confidence = 'LOW';
-        basePrice *= 0.97; // Price more conservatively with low volume
+        basePrice *= 0.99; // Reduced penalty from 0.97 (was 3% penalty, now 1%)
     } else {
         confidence = 'VERY_LOW';
-        basePrice *= 0.94; // Price very conservatively with minimal volume
+        basePrice *= 0.97; // Reduced penalty from 0.94 (was 6% penalty, now 3%)
     }
     
     // Ensure we don't price below break-even
@@ -224,22 +224,22 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
 }
 
 /**
- * Simple 3-level confidence calculation
+ * Simple 3-level confidence calculation - LOWERED THRESHOLDS for more opportunities
  */
 function calculateOverallConfidence(marketData, multiTimeframeData, smartPricing, salesVolume, currentQuantity) {
     let score = 0;
     const factors = [];
     
-    // Sales data quality (40% of confidence)
-    if (salesVolume >= 20) {
+    // Sales data quality (40% of confidence) - REDUCED REQUIREMENTS
+    if (salesVolume >= 10) { // Lowered from 20
         score += 40;
-        factors.push('Excellent sales volume (20+)');
-    } else if (salesVolume >= 10) {
+        factors.push('Excellent sales volume (10+)');
+    } else if (salesVolume >= 5) { // Lowered from 10
         score += 32;
-        factors.push('Good sales volume (10+)');
-    } else if (salesVolume >= 5) {
+        factors.push('Good sales volume (5+)');
+    } else if (salesVolume >= 3) { // Lowered from 5
         score += 24;
-        factors.push('Moderate sales volume (5+)');
+        factors.push('Moderate sales volume (3+)');
     } else if (salesVolume >= 2) {
         score += 16;
         factors.push('Low sales volume (2+)');
@@ -278,11 +278,11 @@ function calculateOverallConfidence(marketData, multiTimeframeData, smartPricing
         factors.push('Limited pricing confidence');
     }
     
-    // Determine final confidence level
+    // Determine final confidence level - LOWERED THRESHOLDS
     let confidenceLevel;
-    if (score >= 80) {
+    if (score >= 70) { // Lowered from 80
         confidenceLevel = 'HIGH';
-    } else if (score >= 60) {
+    } else if (score >= 50) { // Lowered from 60
         confidenceLevel = 'MEDIUM';
     } else {
         confidenceLevel = 'LOW';
@@ -307,26 +307,26 @@ function analyzeWeeklyFlipViability(itemName, priceData, salesData, trend, stabi
     let reasons = [];
     let recommendation = 'AVOID';
     
-    // For weekly flips, we need good weekly volume (35% of score) - LOWERED THRESHOLDS
+    // For weekly flips, we need good weekly volume (35% of score) - FURTHER LOWERED THRESHOLDS
     const weeklyVolume = Math.max(volume / 4, salesData.last_7_days?.volume || 0); // Weekly estimate
-    if (weeklyVolume >= 30) { // Lowered from 50
+    if (weeklyVolume >= 20) { // Lowered from 30
         score += 35;
-        reasons.push('Excellent weekly volume (30+ sales) - reliable liquidity');
-    } else if (weeklyVolume >= 15) { // Lowered from 25
+        reasons.push('Excellent weekly volume (20+ sales) - reliable liquidity');
+    } else if (weeklyVolume >= 10) { // Lowered from 15
         score += 30;
-        reasons.push('Good weekly volume (15+ sales) - good liquidity');
-    } else if (weeklyVolume >= 8) { // Lowered from 15
-        score += 20;
-        reasons.push('Moderate weekly volume (8+ sales) - decent liquidity');
-    } else if (weeklyVolume >= 4) { // Lowered from 8
-        score += 15; // Increased score for this tier
-        reasons.push('Low weekly volume (4+ sales) - may take longer');
-    } else if (weeklyVolume >= 2) { // New tier for very low volume
-        score += 10;
-        reasons.push('Very low weekly volume (2+ sales) - higher risk but possible');
+        reasons.push('Good weekly volume (10+ sales) - good liquidity');
+    } else if (weeklyVolume >= 5) { // Lowered from 8
+        score += 25; // Increased score
+        reasons.push('Moderate weekly volume (5+ sales) - decent liquidity');
+    } else if (weeklyVolume >= 3) { // Lowered from 4
+        score += 20; // Increased score
+        reasons.push('Low weekly volume (3+ sales) - may take longer');
+    } else if (weeklyVolume >= 1) { // Lowered from 2
+        score += 15; // Increased score
+        reasons.push('Very low weekly volume (1+ sales) - higher risk but possible');
     } else {
-        score += 5; // Give some points even for minimal volume
-        reasons.push('Minimal weekly volume (<2 sales) - HIGH RISK but not impossible');
+        score += 10; // Increased from 5
+        reasons.push('Minimal weekly volume (<1 sales) - HIGH RISK but potential exists');
     }
     
     // Price stability is important for 3-7 day holds (25% of score)
@@ -364,19 +364,19 @@ function analyzeWeeklyFlipViability(itemName, priceData, salesData, trend, stabi
         reasons.push('Poor entry point (top 30% of range)');
     }
     
-    // Recent activity check - should have sales within week (20% of score) - LOWERED THRESHOLDS
+    // Recent activity check - should have sales within week (20% of score) - FURTHER LOWERED THRESHOLDS
     if (hasRecentActivity) {
         const weeklyVol = salesData.last_7_days.volume;
-        if (weeklyVol >= 15) { // Lowered from 20
+        if (weeklyVol >= 10) { // Lowered from 15
             score += 20;
-            reasons.push('High weekly activity (15+ sales this week)');
-        } else if (weeklyVol >= 7) { // Lowered from 10
+            reasons.push('High weekly activity (10+ sales this week)');
+        } else if (weeklyVol >= 5) { // Lowered from 7
             score += 17; // Increased score
-            reasons.push('Good weekly activity (7+ sales this week)');
-        } else if (weeklyVol >= 3) { // Lowered from 5
+            reasons.push('Good weekly activity (5+ sales this week)');
+        } else if (weeklyVol >= 2) { // Lowered from 3
             score += 15; // Increased score
-            reasons.push('Moderate weekly activity (3+ sales this week)');
-        } else if (weeklyVol >= 1) { // Lowered threshold
+            reasons.push('Moderate weekly activity (2+ sales this week)');
+        } else if (weeklyVol >= 1) { // Keep this threshold
             score += 12; // Increased score
             reasons.push('Low weekly activity (1+ sales this week)');
         } else {
@@ -388,31 +388,31 @@ function analyzeWeeklyFlipViability(itemName, priceData, salesData, trend, stabi
         reasons.push('No recent weekly activity data - estimated from total volume');
     }
     
-    // Determine recommendation for weekly flips - LOWERED THRESHOLDS
-    if (score >= 65) { // Lowered from 80
+    // Determine recommendation for weekly flips - FURTHER LOWERED THRESHOLDS
+    if (score >= 55) { // Lowered from 65
         recommendation = 'WEEKLY_FLIP_EXCELLENT';
-    } else if (score >= 45) { // Lowered from 65
+    } else if (score >= 35) { // Lowered from 45
         recommendation = 'WEEKLY_FLIP_GOOD';
-    } else if (score >= 25) { // Lowered from 45
+    } else if (score >= 20) { // Lowered from 25
         recommendation = 'WEEKLY_FLIP_MODERATE';
     } else {
         recommendation = 'AVOID_WEEKLY_FLIP';
     }
     
-    // Calculate weekly flip metrics - ADJUSTED THRESHOLDS
+    // Calculate weekly flip metrics - FURTHER ADJUSTED THRESHOLDS
     let estimatedSellDays = '5-7'; // Default estimate
     let targetMarginPercentage = 10; // Realistic margins for weekly flips
     let sellProbability = 60;
     
-    if (score >= 65) { // Lowered from 80
+    if (score >= 55) { // Lowered from 65
         estimatedSellDays = '1-3';
         targetMarginPercentage = 12;
         sellProbability = 90;
-    } else if (score >= 45) { // Lowered from 65
+    } else if (score >= 35) { // Lowered from 45
         estimatedSellDays = '3-5';
         targetMarginPercentage = 10;
         sellProbability = 75;
-    } else if (score >= 25) { // Lowered from 45
+    } else if (score >= 20) { // Lowered from 25
         estimatedSellDays = '5-7';
         targetMarginPercentage = 8;
         sellProbability = 60;
@@ -839,6 +839,12 @@ app.post('/analyze-prices', async (req, res) => {
             const itemPrice = item.price || item.skinportPrice;
             
             if (!itemName || !itemPrice) continue;
+
+            // Skip Battle-Scarred items as requested (avoid low-demand wear condition)
+            if (itemName.includes('Battle-Scarred')) {
+                console.log(`[Filter] Skipping Battle-Scarred item: ${itemName}`);
+                continue;
+            }
 
             // Get both current market data AND sales history
             const marketData = allMarketData[itemName];
