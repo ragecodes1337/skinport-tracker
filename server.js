@@ -258,6 +258,15 @@ function analyzeMultiTimeframe(salesData) {
         else if (priceChange < -10) trend = 'FALLING';
     }
     
+    // CRITICAL: Early volatility check using selected timeframe data
+    const salesData = bestTimeframe.data;
+    const salesVolatility = ((salesData.max - salesData.min) / salesData.avg) * 100;
+    
+    if (salesVolatility > 200) {
+        console.log(`[EARLY VOLATILITY REJECTION] ${salesVolatility.toFixed(1)}% volatility in ${bestTimeframe.period} timeframe - MARKET CHAOS, REJECTED`);
+        return null; // Immediately reject extreme volatility items
+    }
+    
     return {
         bestTimeframe,
         allTimeframes: timeframes,
@@ -327,6 +336,12 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
     // CRITICAL FIX: Use sales data volatility for decision making, not current listing spread
     const salesVolatility = ((salesMax - salesMin) / salesAvg) * 100;
     const currentListingSpread = ((currentMaxPrice - currentMinPrice_val) / currentMeanPrice) * 100;
+    
+    // EARLY VOLATILITY REJECTION: Catch extreme cases immediately 
+    if (salesVolatility > 200) {
+        console.log(`[EARLY VOLATILITY REJECTION] ${salesVolatility.toFixed(1)}% volatility - TOO EXTREME FOR ANALYSIS`);
+        return null; // Signal immediate rejection to calling function
+    }
     
     // STABLE ITEM DETECTION: Use SALES volatility (not current listings) + decent volume
     const isStableItem = salesVolatility <= 15 && weeklyVolume >= 3; // Low sales volatility + decent volume
@@ -442,36 +457,41 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
     let volatilityCategory;
     
     if (salesVolatility > 200) {
-        // EXTREME VOLATILITY (200%+): Auto-reject - still need some limit
-        console.log(`[EXTREME VOLATILITY REJECTION] ${salesVolatility.toFixed(1)}% volatility exceeds 200% limit - TOO CHAOTIC`);
+        // EXTREME VOLATILITY (200%+): Auto-reject - market too chaotic for reliable trading
+        console.log(`[EXTREME VOLATILITY REJECTION] ${salesVolatility.toFixed(1)}% volatility exceeds 200% limit - MARKET CHAOS`);
         return {
             achievablePrice: 0,
             confidence: 'REJECTED',
             strategy: 'EXTREME_VOLATILITY',
-            reasoning: `Extreme volatility (${salesVolatility.toFixed(1)}%) - market too unpredictable for safe trading`
+            reasoning: `REJECTED: Extreme volatility (${salesVolatility.toFixed(1)}%) indicates market manipulation or pricing chaos - unsafe for trading`
         };
+    } else if (salesVolatility > 150) {
+        // VERY HIGH VOLATILITY (150-200%): Nearly auto-reject with ultra-conservative pricing
+        console.log(`[VERY HIGH VOLATILITY WARNING] ${salesVolatility.toFixed(1)}% volatility - ULTRA CONSERVATIVE mode only`);
+        marketToleranceMultiplier = Math.max(0.90, Math.min(0.98, (salesMin * 0.98) / recentMarketAvg)); // Max 98% of recent avg, strongly prefer minimum
+        volatilityCategory = 'VERY_HIGH_VOLATILITY_ULTRA_CONSERVATIVE';
     } else if (salesVolatility > 120) {
         // HIGH VOLATILITY (120-200%): Much more conservative pricing - MAJOR FIX
         marketToleranceMultiplier = Math.max(0.95, Math.min(1.02, (salesMin * 1.02) / recentMarketAvg)); // Max 102% of recent avg, prefer near minimum
         volatilityCategory = 'HIGH_VOLATILITY_VERY_CONSERVATIVE';
         console.log(`[HIGH VOLATILITY CONSERVATIVE] ${salesVolatility.toFixed(1)}% volatility - using very conservative pricing (near sales minimum)`);
-    } else if (salesVolatility > 80) {
-        // MODERATE-HIGH VOLATILITY (80-120%): Conservative pricing - ENHANCED
-        marketToleranceMultiplier = 1.04; // 104% of recent average (was 108%)
-        volatilityCategory = 'MODERATE_HIGH_VOLATILITY';
-        console.log(`[MODERATE-HIGH VOLATILITY] ${salesVolatility.toFixed(1)}% volatility - conservative CS:GO pricing`);
     } else if (salesVolatility > 60) {
-        // MODERATE VOLATILITY (60-80%): Normal CS:GO market conditions
-        marketToleranceMultiplier = 1.08; // 108% of recent average
+        // MODERATE-HIGH VOLATILITY (60-120%): Much more conservative - ENHANCED FOR REALISM
+        marketToleranceMultiplier = 1.00; // 100% of recent average - NO PREMIUM for volatility
+        volatilityCategory = 'MODERATE_HIGH_VOLATILITY_CONSERVATIVE';
+        console.log(`[MODERATE-HIGH VOLATILITY] ${salesVolatility.toFixed(1)}% volatility - NO PREMIUM pricing, recent average max`);
+    } else if (salesVolatility > 40) {
+        // MODERATE VOLATILITY (40-60%): Slightly conservative CS:GO pricing
+        marketToleranceMultiplier = 1.03; // 103% of recent average (was 108%)
         volatilityCategory = 'MODERATE_VOLATILITY';
-        console.log(`[MODERATE VOLATILITY] ${salesVolatility.toFixed(1)}% volatility - normal CS:GO market conditions`);
-    } else if (salesVolatility > 25) {
-        // LOW VOLATILITY (25-60%): Good market conditions
-        marketToleranceMultiplier = 1.12; // 112% of recent average
+        console.log(`[MODERATE VOLATILITY] ${salesVolatility.toFixed(1)}% volatility - slightly conservative CS:GO pricing`);
+    } else if (salesVolatility > 20) {
+        // LOW VOLATILITY (20-40%): Good market conditions
+        marketToleranceMultiplier = 1.06; // 106% of recent average (was 112%)
         volatilityCategory = 'LOW_VOLATILITY';
     } else {
-        // VERY LOW VOLATILITY (≤25%): Stable market - can price higher
-        marketToleranceMultiplier = 1.15; // 115% of recent average
+        // VERY LOW VOLATILITY (≤20%): Stable market - modest premium allowed
+        marketToleranceMultiplier = 1.08; // 108% of recent average (was 115%)
         volatilityCategory = 'VERY_LOW_VOLATILITY';
     }
     
@@ -562,6 +582,13 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
         confidence = 'LOW';
     } else {
         confidence = 'VERY_LOW';
+    }
+    
+    // CRITICAL: Apply volatility-based market tolerance cap to ALL pricing
+    if (basePrice > marketTolerance) {
+        basePrice = marketTolerance;
+        reasoning += `, capped at volatility limit (${volatilityCategory}: max ${(marketToleranceMultiplier * 100).toFixed(1)}% of recent avg)`;
+        console.log(`[Volatility Cap Applied] Price reduced to €${basePrice.toFixed(2)} due to ${salesVolatility.toFixed(1)}% volatility limit`);
     }
     
     // Final safety check: ensure we don't exceed market maximum
@@ -731,7 +758,16 @@ function calculateOverallConfidence(marketData, multiTimeframeData, smartPricing
     const salesData = smartPricing.salesData;
     if (salesData) {
         const salesVolatility = ((salesData.max - salesData.min) / salesData.avg) * 100;
-        if (salesVolatility > 150) {
+        if (salesVolatility > 1000) {
+            liquidityScore = Math.max(liquidityScore - 80, 5); // Extreme penalty for chaos-level volatility
+            factors.push(`EXTREME volatility (${salesVolatility.toFixed(0)}%) - market chaos, avoid trading`);
+        } else if (salesVolatility > 500) {
+            liquidityScore = Math.max(liquidityScore - 65, 5); // Severe penalty for manipulation-level volatility
+            factors.push(`SEVERE volatility (${salesVolatility.toFixed(0)}%) - likely market manipulation`);
+        } else if (salesVolatility > 200) {
+            liquidityScore = Math.max(liquidityScore - 50, 5); // Major penalty for extreme volatility
+            factors.push(`EXTREME volatility (${salesVolatility.toFixed(1)}%) - unpredictable pricing chaos`);
+        } else if (salesVolatility > 150) {
             liquidityScore = Math.max(liquidityScore - 40, 10); // Heavy penalty for extreme volatility
             factors.push(`High volatility (${salesVolatility.toFixed(1)}%) - significant timing risk and pricing uncertainty`);
         } else if (salesVolatility > 100) {
