@@ -18,7 +18,7 @@ const MINIMUM_PROFIT_THRESHOLD = 0.50; // Minimum €0.50 profit
 
 // Rate limiting configuration - Skinport allows 8 requests per 5 minutes
 const RATE_LIMIT_WINDOW = 5 * 60 * 1000; // 5 minutes in milliseconds
-const MAX_REQUESTS_PER_WINDOW = 5; // Use 5 to be very safe (reduced from 7)
+const MAX_REQUESTS_PER_WINDOW = 7; // Use 7 to be safe (was 5, now closer to the 8 limit)
 const requestQueue = []; // Queue to store timestamps of requests
 
 // Middleware
@@ -281,7 +281,7 @@ function createOptimalBatches(uniqueItems, maxUrlLength = 7000) {
         const itemLength = encodeURIComponent(item).length + 1; // +1 for comma
         
         // If adding this item would exceed URL limit or we hit reasonable batch size
-        if (currentUrlLength + itemLength > maxUrlLength || currentBatch.length >= 100) { // Reduced max batch size
+        if (currentUrlLength + itemLength > maxUrlLength || currentBatch.length >= 200) { // Increased from 100 to 200 items per batch
             if (currentBatch.length > 0) {
                 batches.push([...currentBatch]);
                 currentBatch = [];
