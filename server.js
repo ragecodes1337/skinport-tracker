@@ -151,6 +151,10 @@ async function fetchSalesHistoryBatch(marketHashNames, currency) {
         
         const url = `${SKINPORT_API_URL}/sales/history?${params}`;
         console.log(`[API Call] Fetching batch of ${validNames.length} items`);
+        console.log(`[API Call] Item names being queried:`, validNames.slice(0, 5));
+        console.log(`[API Call] Full URL:`, url.substring(0, 200) + '...');
+        console.log(`[API Call] Sample items being requested:`, validNames.slice(0, 3));
+        console.log(`[API Call] Full URL:`, url);
         
         const response = await fetch(url, {
             method: 'GET',
@@ -192,6 +196,10 @@ async function fetchSalesHistoryBatch(marketHashNames, currency) {
         }
 
         const data = await response.json();
+        console.log(`[API Response] Received ${Array.isArray(data) ? data.length : 'non-array'} items from API`);
+        if (Array.isArray(data) && data.length > 0) {
+            console.log(`[API Response] Sample API items:`, data.slice(0, 3).map(item => item.market_hash_name));
+        }
         
         // Convert array response to object with market_hash_name as key
         const batchData = {};
@@ -793,6 +801,13 @@ async function analyzePrices(items, minProfit, minProfitMargin, currency, settin
         const batchSalesHistory = await fetchSalesHistoryBatch(batch, currency);
         
         console.log(`[Analysis] Batch ${i + 1} returned data for ${Object.keys(batchSalesHistory).length} items`);
+        if (Object.keys(batchSalesHistory).length > 0) {
+            console.log(`[Analysis] Sample API response keys:`, Object.keys(batchSalesHistory).slice(0, 3));
+        }
+        if (Object.keys(batchSalesHistory).length > 0) {
+            console.log(`[Analysis] API returned items:`, Object.keys(batchSalesHistory).slice(0, 3));
+        }
+        console.log(`[Analysis] Requested items:`, batch.slice(0, 3));
         
         // Process each item in the batch
         for (const marketHashName of batch) {
@@ -878,6 +893,26 @@ app.get('/health', (req, res) => {
             windowMinutes: 5
         }
     });
+});
+
+// Debug endpoint to test specific item names
+app.get('/debug-item/:itemName', async (req, res) => {
+    try {
+        const itemName = decodeURIComponent(req.params.itemName);
+        console.log(`[Debug] Testing item name: "${itemName}"`);
+        
+        const result = await fetchSalesHistoryBatch([itemName], 'EUR');
+        
+        res.json({
+            requestedName: itemName,
+            foundInAPI: !!result[itemName],
+            apiResponse: result[itemName] || null,
+            allReturnedNames: Object.keys(result)
+        });
+    } catch (error) {
+        console.error('[Debug] Error:', error);
+        res.status(500).json({ error: error.message });
+    }
 });
 
 // Start Express server
