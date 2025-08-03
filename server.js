@@ -348,10 +348,15 @@ app.post('/analyze-prices', async (req, res) => {
                 continue;
             }
 
-            // Calculate statistics
-            const prices = salesData.map(sale => sale.price);
-            if (prices.length === 0) continue;
+            // The salesData is the item object, not an array of sales
+            // We need to check if it has sales history data
+            if (!salesData.sales || !Array.isArray(salesData.sales) || salesData.sales.length === 0) {
+                console.log(`[Backend] No sales history for: ${itemName}`);
+                continue;
+            }
 
+            // Calculate statistics from sales history
+            const prices = salesData.sales.map(sale => sale.price);
             const avgPrice = prices.reduce((sum, price) => sum + price, 0) / prices.length;
             const minPrice = Math.min(...prices);
             const maxPrice = Math.max(...prices);
@@ -375,8 +380,8 @@ app.post('/analyze-prices', async (req, res) => {
                     steamMaxPrice: maxPrice.toFixed(2),
                     profitAmount: profitAmount.toFixed(2),
                     profitPercentage: profitPercentage.toFixed(1),
-                    salesCount: salesData.length,
-                    lastSaleDate: salesData[0]?.date || 'Unknown'
+                    salesCount: salesData.sales.length,
+                    lastSaleDate: salesData.sales[0]?.created_at || 'Unknown'
                 });
                 
                 console.log(`[Profit] Found profitable item: ${itemName} - €${profitAmount.toFixed(2)} (${profitPercentage.toFixed(1)}%)`);
