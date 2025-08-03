@@ -151,6 +151,8 @@ async function fetchSalesHistoryBatch(marketHashNames, currency) {
         
         const url = `${SKINPORT_API_URL}/sales/history?${params}`;
         console.log(`[API Call] Fetching batch of ${validNames.length} items`);
+        console.log(`[API Call] Sample names:`, validNames.slice(0, 3));
+        console.log(`[API Call] Full URL:`, url.substring(0, 300) + '...');
         
         const response = await fetch(url, {
             method: 'GET',
@@ -192,6 +194,9 @@ async function fetchSalesHistoryBatch(marketHashNames, currency) {
         }
 
         const data = await response.json();
+        console.log(`[API Response] Received data type:`, Array.isArray(data) ? 'Array' : typeof data);
+        console.log(`[API Response] Data length/keys:`, Array.isArray(data) ? data.length : Object.keys(data).length);
+        console.log(`[API Response] Sample data:`, JSON.stringify(data).substring(0, 200) + '...');
         
         // Convert array response to object with market_hash_name as key
         const batchData = {};
@@ -205,7 +210,7 @@ async function fetchSalesHistoryBatch(marketHashNames, currency) {
         
         // Cache the batch response
         cache.set(batchKey, batchData);
-        console.log(`[Cache] Batch cache set for ${marketHashNames.length} items`);
+        console.log(`[Cache] Batch cache set for ${validNames.length} items`);
         
         return batchData;
         
