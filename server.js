@@ -582,12 +582,12 @@ app.post('/analyze-prices', async (req, res) => {
             const priceRange = maxPrice - minPrice;
             const coefficientOfVariation = (priceRange / avgPrice) * 100; // CV as percentage
             
-            // ENHANCED: 7-10 day trading focused stability calculation
+            // WEEKLY FLIP TRADING: Enhanced volatility filtering for 3-7 day holds
             let priceStability;
             
-            // For 7-10 day trading, we need much stricter volatility control
-            const isDangerouslyVolatile = coefficientOfVariation > 300; // Items like AWP Redline with 774% variance
-            const isHighlyVolatile = coefficientOfVariation > 150;
+            // Strict volatility control for weekly flip trading strategy
+            const isDangerouslyVolatile = coefficientOfVariation > 200; // Reject extremely volatile items (>200% CV)
+            const isHighlyVolatile = coefficientOfVariation > 100;
             
             // Calculate trend first for stability calculation
             let trendIndicator = 'STABLE';
@@ -608,42 +608,42 @@ app.post('/analyze-prices', async (req, res) => {
             const trendPenalty = trendIndicator === 'FALLING' ? 25 : trendIndicator === 'RISING' ? -5 : 0;
             
             if (isDangerouslyVolatile) {
-                // Auto-reject items with extreme volatility for short-term trading
+                // Auto-reject items with extreme volatility (>200% CV) for weekly flip trading
                 priceStability = 0;
-                console.log(`[7-Day Trading] ${itemName}: REJECTED - Dangerously volatile (CV: ${coefficientOfVariation.toFixed(1)}%)`);
+                console.log(`[Weekly Flip] ${itemName}: REJECTED - Dangerously volatile (CV: ${coefficientOfVariation.toFixed(1)}%) - unsuitable for 3-7 day holds`);
             } else if (avgPrice < 2.0 && volume >= 1000) {
-                // High-volume cases/consumables - good for short-term trading
-                const lenientCV = Math.min(coefficientOfVariation * 0.4, 100);
-                priceStability = Math.max(100 - lenientCV - trendPenalty, 25);
-                console.log(`[7-Day Trading] ${itemName}: High-volume case - suitable for quick flips`);
-            } else if (volume >= 2000) {
-                // Very high volume items - more forgiving but still strict for 7-day trading
-                const adjustedCV = Math.min(coefficientOfVariation * 0.6, 100);
+                // High-volume cases/consumables - acceptable for weekly trading with caution
+                const lenientCV = Math.min(coefficientOfVariation * 0.6, 100);
+                priceStability = Math.max(100 - lenientCV - trendPenalty, 20);
+                console.log(`[Weekly Flip] ${itemName}: High-volume case - moderate risk for weekly holds`);
+            } else if (volume >= 1500) {
+                // Very high volume items - more forgiving for weekly trading
+                const adjustedCV = Math.min(coefficientOfVariation * 0.7, 100);
                 priceStability = Math.max(100 - adjustedCV - trendPenalty, 15);
-                console.log(`[7-Day Trading] ${itemName}: High-volume item - moderate risk for quick trading`);
+                console.log(`[Weekly Flip] ${itemName}: High-volume item - acceptable for weekly trading`);
             } else if (avgPrice < 1.0) {
-                // Other cheap items - need decent volume for 7-day trading
-                if (volume < 50) {
-                    priceStability = 0; // Reject low-volume cheap items for short-term trading
+                // Other cheap items - need excellent volume for weekly trading
+                if (volume < 100) {
+                    priceStability = 0; // Reject low-volume cheap items for weekly trading
                 } else {
-                    const adjustedCV = Math.min(coefficientOfVariation * 0.7, 100);
+                    const adjustedCV = Math.min(coefficientOfVariation * 0.8, 100);
                     priceStability = Math.max(100 - adjustedCV - trendPenalty, 10);
                 }
             } else if (avgPrice < 50.0) {
-                // Mid-range items - stricter requirements for 7-day trading
-                if (isHighlyVolatile || volume < 30) {
-                    priceStability = Math.max(100 - coefficientOfVariation * 1.4 - trendPenalty, 0);
+                // Mid-range items - strict requirements for weekly trading
+                if (isHighlyVolatile || volume < 50) {
+                    priceStability = 0; // Reject volatile or low-volume mid-range items
                 } else {
                     const adjustedCV = Math.min(coefficientOfVariation * 0.9, 100);
-                    priceStability = Math.max(100 - adjustedCV - trendPenalty, 5);
+                    priceStability = Math.max(100 - adjustedCV - trendPenalty, 10);
                 }
             } else {
-                // Expensive items (€50+) - very strict for 7-day trading
-                if (isHighlyVolatile || volume < 20) {
+                // Expensive items (€50+) - very strict for weekly trading
+                if (isHighlyVolatile || volume < 30) {
                     priceStability = 0; // Reject volatile or low-volume expensive items
                 } else {
-                    const strictCV = Math.min(coefficientOfVariation * 1.5, 100);
-                    priceStability = Math.max(100 - strictCV - trendPenalty, 0);
+                    const strictCV = Math.min(coefficientOfVariation * 1.2, 100);
+                    priceStability = Math.max(100 - strictCV - trendPenalty, 5);
                     
                     // Additional penalty for absolute price swings on expensive items
                     const absoluteSwingPenalty = Math.min((priceRange / avgPrice) * 40, 25);
@@ -654,13 +654,13 @@ app.post('/analyze-prices', async (req, res) => {
             // Ensure stability is never negative
             priceStability = Math.max(priceStability, 0);
             
-            console.log(`[Variance] ${itemName}: CV=${coefficientOfVariation.toFixed(1)}%, Range=${priceRange.toFixed(2)}, Stability=${priceStability.toFixed(1)}%, AvgPrice=${avgPrice.toFixed(2)}, Volume=${volume}, PriceTier=${avgPrice >= 500 ? 'VERY_HIGH' : avgPrice >= 50 ? 'HIGH' : avgPrice >= 1 ? 'MID' : 'LOW'}`);
+            console.log(`[Weekly Flip Analysis] ${itemName}: CV=${coefficientOfVariation.toFixed(1)}%, Range=${priceRange.toFixed(2)}, Stability=${priceStability.toFixed(1)}%, AvgPrice=${avgPrice.toFixed(2)}, Volume=${volume}, Strategy=WEEKLY_FLIP`);
             
-            // REMOVED - Skip items with extreme variance (this was eliminating too many items)
-            // if (coefficientOfVariation > 50) {
-            //     console.log(`[Variance] Skipping high-variance item: ${itemName} (CV: ${coefficientOfVariation.toFixed(1)}%)`);
-            //     continue;
-            // }
+            // Early rejection for weekly flip trading - items with extreme volatility
+            if (coefficientOfVariation > 200) {
+                console.log(`[Weekly Flip] ${itemName}: REJECTED - Coefficient of Variation (${coefficientOfVariation.toFixed(1)}%) exceeds 200% threshold for weekly trading`);
+                continue; // Skip to next item
+            }
             
             // Calculate weighted pricing across timeframes (prefer recent data)
             let weightedPrice = avgPrice;
@@ -817,10 +817,10 @@ app.post('/analyze-prices', async (req, res) => {
             
             // ENHANCED profit validation with WEEKLY FLIP focus
             const meetsBasicCriteria = profitAmount >= adjustedMinProfit && profitPercentage >= adjustedMinPercentage;
-            const meetsConfidenceCriteria = profitConfidence >= 15; // Slightly higher confidence for weekly holds
-            const meetsStabilityCriteria = priceStability >= 15; // Higher stability needed for weekly holds
-            const meetsWeeklyFlipCriteria = weeklyFlipViability.score >= 45; // Lower threshold but more realistic
-            const hasGoodLiquidity = volume >= 50 && weeklyFlipViability.weeklyVolume >= 8; // Weekly volume focus
+            const meetsConfidenceCriteria = profitConfidence >= 20; // Higher confidence needed for weekly holds
+            const meetsStabilityCriteria = priceStability >= 20; // Much higher stability needed for weekly holds
+            const meetsWeeklyFlipCriteria = weeklyFlipViability.score >= 50; // Higher threshold for weekly viability
+            const hasGoodLiquidity = volume >= 100 && weeklyFlipViability.weeklyVolume >= 15; // Better liquidity requirements
             
             console.log(`[Validation] ${itemName}: Profit=${profitAmount.toFixed(2)}, Percentage=${profitPercentage.toFixed(1)}%, Confidence=${profitConfidence}%, Stability=${priceStability}%`);
             console.log(`[Weekly Flip] ${itemName}: Viability=${weeklyFlipViability.recommendation} (${weeklyFlipViability.score}/100), Days=${weeklyFlipViability.estimatedSellDays}`);
