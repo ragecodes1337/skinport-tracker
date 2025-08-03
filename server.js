@@ -138,8 +138,10 @@ async function fetchSalesHistoryBatch(marketHashNames, currency) {
     try {
         await waitForRateLimit();
         
-        // Create comma-separated list of market hash names (URLSearchParams will handle encoding)
-        const marketHashNamesParam = validNames.join(',');
+        // Properly encode market hash names
+        const marketHashNamesParam = validNames
+            .map(name => encodeURIComponent(name))
+            .join(',');
             
         const params = new URLSearchParams({
             app_id: APP_ID_CSGO,
@@ -149,17 +151,13 @@ async function fetchSalesHistoryBatch(marketHashNames, currency) {
         
         const url = `${SKINPORT_API_URL}/sales/history?${params}`;
         console.log(`[API Call] Fetching batch of ${validNames.length} items`);
-        console.log(`[API Call] Item names being queried:`, validNames.slice(0, 5));
-        console.log(`[API Call] Full URL:`, url.substring(0, 200) + '...');
-        console.log(`[API Call] Sample items being requested:`, validNames.slice(0, 3));
-        console.log(`[API Call] Full URL:`, url);
         
         const response = await fetch(url, {
             method: 'GET',
             headers: {
-                'Accept-Encoding': 'gzip, deflate, br',
+                'Accept-Encoding': 'br',
                 'Accept': 'application/json',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
         });
         
@@ -194,10 +192,6 @@ async function fetchSalesHistoryBatch(marketHashNames, currency) {
         }
 
         const data = await response.json();
-        console.log(`[API Response] Received ${Array.isArray(data) ? data.length : 'non-array'} items from API`);
-        if (Array.isArray(data) && data.length > 0) {
-            console.log(`[API Response] Sample API items:`, data.slice(0, 3).map(item => item.market_hash_name));
-        }
         
         // Convert array response to object with market_hash_name as key
         const batchData = {};
@@ -219,95 +213,6 @@ async function fetchSalesHistoryBatch(marketHashNames, currency) {
         console.error(`[Data Collection] Error fetching batch sales history: ${error.message}`);
         return {};
     }
-}
-
-/**
- * Fallback to Steam Community Market API when Skinport API fails
- */
-async function fetchSteamMarketData(itemName) {
-    try {
-        const cacheKey = `steam_${itemName}`;
-        const cachedData = cache.get(cacheKey);
-        
-        if (cachedData) {
-            return cachedData;
-        }
-
-        const params = new URLSearchParams({
-            appid: APP_ID_CSGO,
-            currency: 3, // EUR
-            market_hash_name: itemName
-        });
-        
-        const url = `${STEAM_API_URL}?${params}`;
-        console.log(`[Steam API] Fetching: ${itemName}`);
-        
-        const response = await fetch(url);
-        
-        if (!response.ok) {
-            console.error(`[Steam API] Error ${response.status} for ${itemName}`);
-            return null;
-        }
-        
-        const data = await response.json();
-        
-        if (data.success) {
-            // Convert Steam format to match our expected format
-            const steamData = {
-                market_hash_name: itemName,
-                last_7_days: {
-                    median: parseFloat(data.median_price?.replace(/[€$,]/g, '') || 0),
-                    volume: data.volume ? parseInt(data.volume.replace(/,/g, '')) : 0,
-                    min: parseFloat(data.lowest_price?.replace(/[€$,]/g, '') || 0),
-                    max: parseFloat(data.median_price?.replace(/[€$,]/g, '') || 0) * 1.2 // Estimate
-                },
-                last_30_days: {
-                    median: parseFloat(data.median_price?.replace(/[€$,]/g, '') || 0),
-                    volume: data.volume ? parseInt(data.volume.replace(/,/g, '')) * 4 : 0 // Estimate
-                }
-            };
-            
-            // Cache for 10 minutes
-            cache.set(cacheKey, steamData, 600);
-            return steamData;
-        }
-        
-        return null;
-        
-    } catch (error) {
-        console.error(`[Steam API] Error fetching ${itemName}: ${error.message}`);
-        return null;
-    }
-}
-
-/**
- * Enhanced fetchSalesHistoryBatch with Steam API fallback
- */
-async function fetchSalesHistoryBatchWithFallback(marketHashNames, currency) {
-    // First try Skinport API
-    const skinportData = await fetchSalesHistoryBatch(marketHashNames, currency);
-    
-    // If Skinport returns no data, try Steam API for each item
-    if (Object.keys(skinportData).length === 0 && marketHashNames.length > 0) {
-        console.log(`[Fallback] Skinport API returned no data, trying Steam API...`);
-        
-        const fallbackData = {};
-        
-        // Limit to first 5 items to avoid rate limiting
-        for (const itemName of marketHashNames.slice(0, 5)) {
-            const steamData = await fetchSteamMarketData(itemName);
-            if (steamData) {
-                fallbackData[itemName] = steamData;
-            }
-            // Small delay to avoid overwhelming Steam API
-            await delay(200);
-        }
-        
-        console.log(`[Fallback] Steam API returned ${Object.keys(fallbackData).length} items`);
-        return fallbackData;
-    }
-    
-    return skinportData;
 }
 
 /**
@@ -642,9 +547,12 @@ function analyzeItemOpportunity(currentPrice, apiData, minProfit, minProfitMargi
     console.log(`[Filter] Item analysis: Profit=€${profit.toFixed(2)}, Margin=${profitMargin.toFixed(1)}%, Liquidity=${liquidity.rating}, Sales7d=${liquidity.sales7d}`);
     console.log(`[Filter] User settings: minProfit=€${minProfit}, minProfitMargin=${minProfitMargin}%, minLiquidity=${settings.minLiquidity}, minSalesVolume=${settings.minSalesVolume}`);
     
-    // Use user settings directly - trust the user's judgment
-    const actualMinProfit = minProfit || 0;
-    const actualMinMargin = minProfitMargin || 0;
+    // More lenient profit filtering - only apply if user settings are stricter than our calculated minimums
+    const calculatedMinProfit = currentPrice < 5 ? 0.50 : currentPrice < 20 ? 1.50 : currentPrice < 100 ? 3.00 : 5.00;
+    const calculatedMinMargin = currentPrice < 5 ? 5 : currentPrice < 20 ? 8 : currentPrice < 100 ? 10 : 12;
+    
+    const actualMinProfit = Math.max(minProfit || 0, calculatedMinProfit);
+    const actualMinMargin = Math.max(minProfitMargin || 0, calculatedMinMargin);
     
     if (profit < actualMinProfit || profitMargin < actualMinMargin) {
         console.log(`[Filter] REJECTED: Profit/margin below threshold (Profit: €${profit.toFixed(2)} < €${actualMinProfit}, Margin: ${profitMargin.toFixed(1)}% < ${actualMinMargin}%)`);
@@ -657,8 +565,10 @@ function analyzeItemOpportunity(currentPrice, apiData, minProfit, minProfitMargi
         return null; // Doesn't meet liquidity requirements
     }
     
-    // Use user's sales volume preference directly
-    const actualMinSales = settings.minSalesVolume || 5;
+    // More lenient sales volume filtering
+    const userMinSales = settings.minSalesVolume || 5;
+    const calculatedMinSales = currentPrice < 5 ? 5 : currentPrice < 20 ? 8 : currentPrice < 100 ? 10 : 12;
+    const actualMinSales = Math.max(userMinSales, calculatedMinSales);
     
     if (liquidity.sales7d < actualMinSales) {
         console.log(`[Filter] REJECTED: Sales volume too low (${liquidity.sales7d} < ${actualMinSales})`);
@@ -888,13 +798,6 @@ async function analyzePrices(items, minProfit, minProfitMargin, currency, settin
         const batchSalesHistory = await fetchSalesHistoryBatch(batch, currency);
         
         console.log(`[Analysis] Batch ${i + 1} returned data for ${Object.keys(batchSalesHistory).length} items`);
-        if (Object.keys(batchSalesHistory).length > 0) {
-            console.log(`[Analysis] Sample API response keys:`, Object.keys(batchSalesHistory).slice(0, 3));
-        }
-        if (Object.keys(batchSalesHistory).length > 0) {
-            console.log(`[Analysis] API returned items:`, Object.keys(batchSalesHistory).slice(0, 3));
-        }
-        console.log(`[Analysis] Requested items:`, batch.slice(0, 3));
         
         // Process each item in the batch
         for (const marketHashName of batch) {
@@ -980,26 +883,6 @@ app.get('/health', (req, res) => {
             windowMinutes: 5
         }
     });
-});
-
-// Debug endpoint to test specific item names
-app.get('/debug-item/:itemName', async (req, res) => {
-    try {
-        const itemName = decodeURIComponent(req.params.itemName);
-        console.log(`[Debug] Testing item name: "${itemName}"`);
-        
-        const result = await fetchSalesHistoryBatch([itemName], 'EUR');
-        
-        res.json({
-            requestedName: itemName,
-            foundInAPI: !!result[itemName],
-            apiResponse: result[itemName] || null,
-            allReturnedNames: Object.keys(result)
-        });
-    } catch (error) {
-        console.error('[Debug] Error:', error);
-        res.status(500).json({ error: error.message });
-    }
 });
 
 // Start Express server
