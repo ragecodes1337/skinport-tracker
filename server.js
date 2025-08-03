@@ -547,12 +547,9 @@ function analyzeItemOpportunity(currentPrice, apiData, minProfit, minProfitMargi
     console.log(`[Filter] Item analysis: Profit=€${profit.toFixed(2)}, Margin=${profitMargin.toFixed(1)}%, Liquidity=${liquidity.rating}, Sales7d=${liquidity.sales7d}`);
     console.log(`[Filter] User settings: minProfit=€${minProfit}, minProfitMargin=${minProfitMargin}%, minLiquidity=${settings.minLiquidity}, minSalesVolume=${settings.minSalesVolume}`);
     
-    // More lenient profit filtering - only apply if user settings are stricter than our calculated minimums
-    const calculatedMinProfit = currentPrice < 5 ? 0.50 : currentPrice < 20 ? 1.50 : currentPrice < 100 ? 3.00 : 5.00;
-    const calculatedMinMargin = currentPrice < 5 ? 5 : currentPrice < 20 ? 8 : currentPrice < 100 ? 10 : 12;
-    
-    const actualMinProfit = Math.max(minProfit || 0, calculatedMinProfit);
-    const actualMinMargin = Math.max(minProfitMargin || 0, calculatedMinMargin);
+    // Use user settings directly - trust the user's judgment
+    const actualMinProfit = minProfit || 0;
+    const actualMinMargin = minProfitMargin || 0;
     
     if (profit < actualMinProfit || profitMargin < actualMinMargin) {
         console.log(`[Filter] REJECTED: Profit/margin below threshold (Profit: €${profit.toFixed(2)} < €${actualMinProfit}, Margin: ${profitMargin.toFixed(1)}% < ${actualMinMargin}%)`);
@@ -565,10 +562,8 @@ function analyzeItemOpportunity(currentPrice, apiData, minProfit, minProfitMargi
         return null; // Doesn't meet liquidity requirements
     }
     
-    // More lenient sales volume filtering
-    const userMinSales = settings.minSalesVolume || 5;
-    const calculatedMinSales = currentPrice < 5 ? 5 : currentPrice < 20 ? 8 : currentPrice < 100 ? 10 : 12;
-    const actualMinSales = Math.max(userMinSales, calculatedMinSales);
+    // Use user's sales volume preference directly
+    const actualMinSales = settings.minSalesVolume || 5;
     
     if (liquidity.sales7d < actualMinSales) {
         console.log(`[Filter] REJECTED: Sales volume too low (${liquidity.sales7d} < ${actualMinSales})`);
