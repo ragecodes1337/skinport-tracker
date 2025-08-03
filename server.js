@@ -14,7 +14,7 @@ const cache = new NodeCache({ stdTTL: 300, checkperiod: 120 });
 const SKINPORT_API_URL = 'https://api.skinport.com/v1';
 const APP_ID_CSGO = 730;
 const SKINPORT_FEE = 0.08; // 8% seller fee
-const MINIMUM_PROFIT_THRESHOLD = 0.50; // Minimum €0.50 profit
+const MINIMUM_PROFIT_THRESHOLD = 0.20; // Minimum €0.20 profit (lowered from €0.50 for more opportunities)
 
 // Rate limiting configuration - Skinport allows 8 requests per 5 minutes
 const RATE_LIMIT_WINDOW = 5 * 60 * 1000; // 5 minutes in milliseconds
@@ -37,22 +37,26 @@ function analyzeWeeklyFlipViability(itemName, priceData, salesData, trend, stabi
     let reasons = [];
     let recommendation = 'AVOID';
     
-    // For weekly flips, we need good weekly volume (35% of score)
+    // For weekly flips, we need good weekly volume (35% of score) - LOWERED THRESHOLDS
     const weeklyVolume = Math.max(volume / 4, salesData.last_7_days?.volume || 0); // Weekly estimate
-    if (weeklyVolume >= 50) {
+    if (weeklyVolume >= 30) { // Lowered from 50
         score += 35;
-        reasons.push('Excellent weekly volume (50+ sales) - reliable liquidity');
-    } else if (weeklyVolume >= 25) {
+        reasons.push('Excellent weekly volume (30+ sales) - reliable liquidity');
+    } else if (weeklyVolume >= 15) { // Lowered from 25
         score += 30;
-        reasons.push('Good weekly volume (25+ sales) - good liquidity');
-    } else if (weeklyVolume >= 15) {
+        reasons.push('Good weekly volume (15+ sales) - good liquidity');
+    } else if (weeklyVolume >= 8) { // Lowered from 15
         score += 20;
-        reasons.push('Moderate weekly volume (15+ sales) - decent liquidity');
-    } else if (weeklyVolume >= 8) {
+        reasons.push('Moderate weekly volume (8+ sales) - decent liquidity');
+    } else if (weeklyVolume >= 4) { // Lowered from 8
+        score += 15; // Increased score for this tier
+        reasons.push('Low weekly volume (4+ sales) - may take longer');
+    } else if (weeklyVolume >= 2) { // New tier for very low volume
         score += 10;
-        reasons.push('Low weekly volume (8+ sales) - may take longer');
+        reasons.push('Very low weekly volume (2+ sales) - higher risk but possible');
     } else {
-        reasons.push('Very low weekly volume (<8 sales) - RISKY');
+        score += 5; // Give some points even for minimal volume
+        reasons.push('Minimal weekly volume (<2 sales) - HIGH RISK but not impossible');
     }
     
     // Price stability is important for 3-7 day holds (25% of score)
@@ -90,51 +94,55 @@ function analyzeWeeklyFlipViability(itemName, priceData, salesData, trend, stabi
         reasons.push('Poor entry point (top 30% of range)');
     }
     
-    // Recent activity check - should have sales within week (20% of score)
+    // Recent activity check - should have sales within week (20% of score) - LOWERED THRESHOLDS
     if (hasRecentActivity) {
         const weeklyVol = salesData.last_7_days.volume;
-        if (weeklyVol >= 20) {
+        if (weeklyVol >= 15) { // Lowered from 20
             score += 20;
-            reasons.push('High weekly activity (20+ sales this week)');
-        } else if (weeklyVol >= 10) {
-            score += 15;
-            reasons.push('Good weekly activity (10+ sales this week)');
-        } else if (weeklyVol >= 5) {
-            score += 10;
-            reasons.push('Moderate weekly activity (5+ sales this week)');
+            reasons.push('High weekly activity (15+ sales this week)');
+        } else if (weeklyVol >= 7) { // Lowered from 10
+            score += 17; // Increased score
+            reasons.push('Good weekly activity (7+ sales this week)');
+        } else if (weeklyVol >= 3) { // Lowered from 5
+            score += 15; // Increased score
+            reasons.push('Moderate weekly activity (3+ sales this week)');
+        } else if (weeklyVol >= 1) { // Lowered threshold
+            score += 12; // Increased score
+            reasons.push('Low weekly activity (1+ sales this week)');
         } else {
-            score += 5;
-            reasons.push('Low weekly activity (1-4 sales this week)');
+            score += 8; // Give some points even if no recent sales
+            reasons.push('Minimal weekly activity but still trackable');
         }
     } else {
-        reasons.push('No recent weekly activity - may take longer to sell');
+        score += 5; // Give some base points even without recent activity
+        reasons.push('No recent weekly activity data - estimated from total volume');
     }
     
-    // Determine recommendation for weekly flips
-    if (score >= 80) {
+    // Determine recommendation for weekly flips - LOWERED THRESHOLDS
+    if (score >= 65) { // Lowered from 80
         recommendation = 'WEEKLY_FLIP_EXCELLENT';
-    } else if (score >= 65) {
+    } else if (score >= 45) { // Lowered from 65
         recommendation = 'WEEKLY_FLIP_GOOD';
-    } else if (score >= 45) {
+    } else if (score >= 25) { // Lowered from 45
         recommendation = 'WEEKLY_FLIP_MODERATE';
     } else {
         recommendation = 'AVOID_WEEKLY_FLIP';
     }
     
-    // Calculate weekly flip metrics
+    // Calculate weekly flip metrics - ADJUSTED THRESHOLDS
     let estimatedSellDays = '5-7'; // Default estimate
     let targetMarginPercentage = 10; // Realistic margins for weekly flips
     let sellProbability = 60;
     
-    if (score >= 80) {
+    if (score >= 65) { // Lowered from 80
         estimatedSellDays = '1-3';
         targetMarginPercentage = 12;
         sellProbability = 90;
-    } else if (score >= 65) {
+    } else if (score >= 45) { // Lowered from 65
         estimatedSellDays = '3-5';
         targetMarginPercentage = 10;
         sellProbability = 75;
-    } else if (score >= 45) {
+    } else if (score >= 25) { // Lowered from 45
         estimatedSellDays = '5-7';
         targetMarginPercentage = 8;
         sellProbability = 60;
@@ -179,7 +187,7 @@ function calculateWeeklyFlipStrategy(buyPrice, marketData, viability) {
     let recommendedPrice;
     let expectedDays;
     
-    if (viability.recommendation === 'WEEKLY_FLIP_EXCELLENT' && viability.score >= 80) {
+    if (viability.recommendation === 'WEEKLY_FLIP_EXCELLENT' && viability.score >= 65) { // Lowered from 80
         recommendedPrice = patientPrice; // Can afford to wait for better price
         expectedDays = '2-4';
     } else if (viability.recommendation === 'WEEKLY_FLIP_GOOD') {
@@ -582,12 +590,12 @@ app.post('/analyze-prices', async (req, res) => {
             const priceRange = maxPrice - minPrice;
             const coefficientOfVariation = (priceRange / avgPrice) * 100; // CV as percentage
             
-            // WEEKLY FLIP TRADING: Enhanced volatility filtering for 3-7 day holds
+            // WEEKLY FLIP TRADING: Enhanced volatility filtering for 3-7 day holds (RELAXED for more opportunities)
             let priceStability;
             
-            // Strict volatility control for weekly flip trading strategy
-            const isDangerouslyVolatile = coefficientOfVariation > 300; // Keep strict for extreme cases like AWP Asiimov
-            const isHighlyVolatile = coefficientOfVariation > 150; // Moderate threshold
+            // More permissive volatility control - only block extreme outliers
+            const isDangerouslyVolatile = coefficientOfVariation > 400; // Increased from 300 to 400 - only block extreme cases
+            const isHighlyVolatile = coefficientOfVariation > 200; // Increased from 150 to 200
             
             // Calculate trend first for stability calculation
             let trendIndicator = 'STABLE';
@@ -608,9 +616,9 @@ app.post('/analyze-prices', async (req, res) => {
             const trendPenalty = trendIndicator === 'FALLING' ? 25 : trendIndicator === 'RISING' ? -5 : 0;
             
             if (isDangerouslyVolatile) {
-                // Auto-reject items with extreme volatility (>200% CV) for weekly flip trading
-                priceStability = 0;
-                console.log(`[Weekly Flip] ${itemName}: REJECTED - Dangerously volatile (CV: ${coefficientOfVariation.toFixed(1)}%) - unsuitable for 3-7 day holds`);
+                // Give dangerous items a low but non-zero stability score for consideration
+                priceStability = 2;
+                console.log(`[Weekly Flip] ${itemName}: HIGH RISK - Dangerously volatile (CV: ${coefficientOfVariation.toFixed(1)}%) - minimal stability but not auto-rejected`);
             } else if (avgPrice < 2.0 && volume >= 1000) {
                 // High-volume cases/consumables - acceptable for weekly trading with caution
                 const lenientCV = Math.min(coefficientOfVariation * 0.6, 100);
@@ -622,12 +630,12 @@ app.post('/analyze-prices', async (req, res) => {
                 priceStability = Math.max(100 - adjustedCV - trendPenalty, 15);
                 console.log(`[Weekly Flip] ${itemName}: High-volume item - acceptable for weekly trading`);
             } else if (avgPrice < 1.0) {
-                // Other cheap items - need good volume for weekly trading
-                if (volume < 50) {
-                    priceStability = 0; // Reject low-volume cheap items for weekly trading
+                // Other cheap items - more lenient volume requirements
+                if (volume < 20) {
+                    priceStability = 2; // Give low stability instead of 0 for consideration
                 } else {
                     const adjustedCV = Math.min(coefficientOfVariation * 0.9, 100);
-                    priceStability = Math.max(100 - adjustedCV - trendPenalty, 10);
+                    priceStability = Math.max(100 - adjustedCV - trendPenalty, 5); // Minimum 5 instead of 10
                 }
             } else if (avgPrice < 50.0) {
                 // Mid-range items - balanced requirements for weekly trading
@@ -658,9 +666,9 @@ app.post('/analyze-prices', async (req, res) => {
             
             console.log(`[Weekly Flip Analysis] ${itemName}: CV=${coefficientOfVariation.toFixed(1)}%, Range=${priceRange.toFixed(2)}, Stability=${priceStability.toFixed(1)}%, AvgPrice=${avgPrice.toFixed(2)}, Volume=${volume}, Strategy=WEEKLY_FLIP`);
             
-            // Early rejection for weekly flip trading - only extreme volatility cases
-            if (coefficientOfVariation > 300) {
-                console.log(`[Weekly Flip] ${itemName}: REJECTED - Coefficient of Variation (${coefficientOfVariation.toFixed(1)}%) exceeds 300% threshold for weekly trading`);
+            // Early rejection for weekly flip trading - only extreme volatility cases (RELAXED threshold)
+            if (coefficientOfVariation > 400) {
+                console.log(`[Weekly Flip] ${itemName}: REJECTED - Coefficient of Variation (${coefficientOfVariation.toFixed(1)}%) exceeds 400% threshold for weekly trading`);
                 continue; // Skip to next item
             }
             
@@ -817,12 +825,12 @@ app.post('/analyze-prices', async (req, res) => {
             const weeklyFlipViability = analyzeWeeklyFlipViability(itemName, priceData, salesData, trendIndicator, priceStability);
             const weeklyFlipStrategy = calculateWeeklyFlipStrategy(skinportPriceNum, priceData, weeklyFlipViability);
             
-            // ENHANCED profit validation with WEEKLY FLIP focus (balanced criteria for 3-7 day trading)
+            // ENHANCED profit validation with WEEKLY FLIP focus (LOWERED criteria to find more opportunities)
             const meetsBasicCriteria = profitAmount >= adjustedMinProfit && profitPercentage >= adjustedMinPercentage;
-            const meetsConfidenceCriteria = profitConfidence >= 25; // Reasonable confidence for weekly holds
-            const meetsStabilityCriteria = priceStability >= 8; // Balanced stability requirement
-            const meetsWeeklyFlipCriteria = weeklyFlipViability.score >= 40; // Practical weekly flip threshold
-            const hasGoodLiquidity = volume >= 30 && weeklyFlipViability.weeklyVolume >= 5; // Realistic liquidity requirements
+            const meetsConfidenceCriteria = profitConfidence >= 15; // Lowered from 25 to 15 for more opportunities
+            const meetsStabilityCriteria = priceStability >= 3; // Lowered from 8 to 3 for more flexible trading
+            const meetsWeeklyFlipCriteria = weeklyFlipViability.score >= 25; // Lowered from 40 to 25 for broader selection
+            const hasGoodLiquidity = volume >= 15 && weeklyFlipViability.weeklyVolume >= 2; // Lowered volume requirements significantly
             
             console.log(`[Validation] ${itemName}: Profit=${profitAmount.toFixed(2)}, Percentage=${profitPercentage.toFixed(1)}%, Confidence=${profitConfidence}%, Stability=${priceStability}%`);
             console.log(`[Weekly Flip] ${itemName}: Viability=${weeklyFlipViability.recommendation} (${weeklyFlipViability.score}/100), Days=${weeklyFlipViability.estimatedSellDays}`);
