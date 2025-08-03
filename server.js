@@ -570,8 +570,14 @@ function computeAchievablePrice(apiData) {
     let undercutFactor = 1.00;
     if (m24 && m30 && (m24 < m30 * 0.95)) undercutFactor = 0.98;
 
-    // 6) Calculate achievable price with sell underprice
-    const sellUnderprice = 0.99; // Need to price ~1% below market
+    // 6) Calculate achievable price with adaptive sell underprice
+    let sellUnderprice = 0.995; // Default to 0.5% below market
+    if (m24 && m7) {
+        const dip = (m24 - m7) / m7;
+        if (dip <= -0.06) sellUnderprice = 0.985; // Deeper discount for strong downtrend
+        else if (dip <= -0.02) sellUnderprice = 0.99; // Moderate discount for slight downtrend
+    }
+    
     const rawPredicted = baseMedian * trendFactor * liquidityFactor * volatilityFactor * undercutFactor;
     const achievablePrice = rawPredicted * sellUnderprice;
 
@@ -613,15 +619,31 @@ function calculateEnhancedProfit(currentPrice, apiData, settings = {}) {
     const profit = netSellingPrice - effectiveCost;
     const profitMargin = (profit / effectiveCost) * 100;
 
-    // Dynamic sales thresholds by price
-    if ((currentPrice < 5 && v7 < 40) ||
-        (currentPrice >= 5 && currentPrice < 15 && v7 < 25) ||
-        (currentPrice >= 15 && v7 < (settings.minSalesVolume || 5))) {
-        return null; // Insufficient sales volume for price range
+    // Dynamic sales thresholds by price with more lenient requirements
+    const v7req = currentPrice < 5 ? 35 :
+                  currentPrice < 15 ? 20 :
+                  (settings.minSalesVolume || 12);
+    
+    if (v7 < v7req) {
+        console.log(`[Filter] REJECTED: Insufficient sales volume (${v7} < ${v7req}) for price €${currentPrice}`);
+        return null;
     }
 
-    // Volatility cap
-    if (vol7 > (settings.maxVolatility || 0.50)) {
+    // Price band minimum profit requirements
+    const priceBandMin = currentPrice < 10 ? 3 :
+                        currentPrice < 50 ? 5 :
+                        currentPrice < 150 ? 8 : 12;
+    
+    const minMargin = settings.minProfitMargin ?? 15; // Allow 15% margin by default
+    
+    if (profit < Math.max(settings.minProfit ?? 0, priceBandMin) || profitMargin < minMargin) {
+        console.log(`[Filter] REJECTED: Profit/margin too low (Profit: ${profit.toFixed(2)} < ${Math.max(settings.minProfit ?? 0, priceBandMin)}, Margin: ${profitMargin.toFixed(2)}% < ${minMargin}%)`);
+        return null;
+    }
+
+    // Volatility cap (as fraction, not percent)
+    const maxVol = (settings.maxVolatility ?? 50) / 100;
+    if (vol7 > maxVol) {
         return null; // Too volatile
     }
 
