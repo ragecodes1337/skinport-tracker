@@ -997,12 +997,12 @@ app.post('/analyze-prices', async (req, res) => {
                     }
                 },
                 
-                // Recommendation based on confidence and profit
-                recommendation: overallConfidence.level === 'HIGH' && profitPercentage > 15 ? 'STRONG_BUY' :
-                               overallConfidence.level === 'HIGH' && profitPercentage > 8 ? 'BUY' :
-                               overallConfidence.level === 'MEDIUM' && profitPercentage > 12 ? 'BUY' :
-                               overallConfidence.level === 'MEDIUM' && profitPercentage > 6 ? 'CONSIDER' :
-                               profitPercentage > 10 ? 'CONSIDER' : 'HOLD'
+                // Recommendation based on confidence and profit (UPDATED FOR REALISTIC MARGINS)
+                recommendation: overallConfidence.level === 'HIGH' && profitPercentage > 5 ? 'STRONG_BUY' :
+                               overallConfidence.level === 'HIGH' && profitPercentage > 3 ? 'BUY' :
+                               overallConfidence.level === 'MEDIUM' && profitPercentage > 6 ? 'BUY' :
+                               overallConfidence.level === 'MEDIUM' && profitPercentage > 3 ? 'CONSIDER' :
+                               profitPercentage > 2 ? 'CONSIDER' : 'HOLD'
             });
             
             console.log(`[Smart Analysis] ${itemName}:`);
