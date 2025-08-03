@@ -381,7 +381,16 @@ function analyzeWeeklyFlipViability(itemName, priceData, salesData, trend, stabi
     let recommendation = 'AVOID';
     
     // For weekly flips, we need good weekly volume (35% of score) - PERFECT BALANCE THRESHOLDS
-    const weeklyVolume = Math.max(volume / 4, salesData.last_7_days?.volume || 0); // Weekly estimate
+    // CRITICAL: Use actual 7d volume when available, fallback to estimate
+    const actual7dVolume = salesData.last_7_days?.volume || 0;
+    const estimated7dVolume = Math.max(volume / 4, 1);
+    const weeklyVolume = actual7dVolume > 0 ? actual7dVolume : estimated7dVolume;
+    
+    // Log volume calculation for transparency
+    if (actual7dVolume > 0 && actual7dVolume !== estimated7dVolume) {
+        console.log(`[Volume Calculation] ${itemName}: Using actual 7d volume (${actual7dVolume}) vs estimated (${estimated7dVolume.toFixed(1)})`);
+    }
+    
     if (weeklyVolume >= 15) { // Quality threshold for excellent weekly volume
         score += 35;
         reasons.push('Excellent weekly volume (15+ sales) - reliable liquidity');
@@ -472,19 +481,22 @@ function analyzeWeeklyFlipViability(itemName, priceData, salesData, trend, stabi
         recommendation = 'AVOID_WEEKLY_FLIP';
     }
     
-    // Calculate weekly flip metrics - PERFECT BALANCE ADJUSTMENTS
+    // Calculate weekly flip metrics - PERFECT BALANCE ADJUSTMENTS + REALISTIC VOLUME CONSIDERATION
     let estimatedSellDays = '5-7'; // Default estimate
     let targetMarginPercentage = 10; // Realistic margins for weekly flips
     let sellProbability = 60;
     
+    // CRITICAL: Adjust estimates based on actual recent volume and pricing position
+    const recent7dAvg = salesData.last_7_days?.avg || avgPrice;
+    
     if (score >= 50) { // Perfect balance threshold
-        estimatedSellDays = '1-3';
+        estimatedSellDays = actual7dVolume <= 2 ? '5-10' : '1-3'; // Reality check for low volume
         targetMarginPercentage = 12;
-        sellProbability = 90;
+        sellProbability = actual7dVolume <= 2 ? 70 : 90; // Lower probability for low volume
     } else if (score >= 30) { // Perfect balance threshold
-        estimatedSellDays = '3-5';
+        estimatedSellDays = actual7dVolume <= 2 ? '7-12' : '3-5'; // Reality check for low volume
         targetMarginPercentage = 10;
-        sellProbability = 75;
+        sellProbability = actual7dVolume <= 2 ? 60 : 75; // Lower probability for low volume
     } else if (score >= 15) { // Perfect balance threshold
         estimatedSellDays = '5-7';
         targetMarginPercentage = 8;
@@ -493,6 +505,16 @@ function analyzeWeeklyFlipViability(itemName, priceData, salesData, trend, stabi
         estimatedSellDays = '7+';
         targetMarginPercentage = 15;
         sellProbability = 40;
+    }
+    
+    // Additional penalty for pricing significantly above recent sales
+    if (avgPrice > recent7dAvg * 1.15) { // 15% above recent average
+        estimatedSellDays = estimatedSellDays === '1-3' ? '7-14' :
+                           estimatedSellDays === '3-5' ? '7-14' :
+                           estimatedSellDays === '5-7' ? '10-21' :
+                           estimatedSellDays === '5-10' ? '14-28' : estimatedSellDays;
+        sellProbability = Math.max(sellProbability - 20, 30);
+        reasons.push(`Pricing ${((avgPrice/recent7dAvg - 1) * 100).toFixed(1)}% above recent 7d average - extended timeline`);
     }
     
     return {
@@ -1021,6 +1043,30 @@ app.post('/analyze-prices', async (req, res) => {
             let enhancedTimeEstimate = timeEstimate; // Default from confidence
             if (weeklyFlipAnalysis && weeklyFlipAnalysis.estimatedSellDays) {
                 enhancedTimeEstimate = weeklyFlipAnalysis.estimatedSellDays;
+            }
+            
+            // CRITICAL: Recent Volume Reality Check - Override optimistic estimates for low recent activity
+            // This fixes cases like StatTrak™ SSG 08 Blood in the Water where 90d volume is high but recent activity is minimal
+            const recentVolume24h = multiTimeframeAnalysis.allTimeframes.find(t => t.period === '24h')?.data.volume || 0;
+            const recentVolume7d = multiTimeframeAnalysis.allTimeframes.find(t => t.period === '7d')?.data.volume || 0;
+            const priceAboveRecent7dAvg = achievableGrossPrice > (multiTimeframeAnalysis.allTimeframes.find(t => t.period === '7d')?.data.avg || 0);
+            
+            // High-value items (>€150) with low recent volume need realistic time estimates
+            if (skinportBuyPrice > 150) {
+                if (recentVolume24h <= 1 && recentVolume7d <= 3) {
+                    enhancedTimeEstimate = '7-14 days';
+                    console.log(`[Volume Reality] ${itemName}: High-value item (€${skinportBuyPrice.toFixed(2)}) with low recent activity (24h: ${recentVolume24h}, 7d: ${recentVolume7d}) - realistic time estimate: ${enhancedTimeEstimate}`);
+                } else if (recentVolume7d <= 5 && priceAboveRecent7dAvg) {
+                    enhancedTimeEstimate = enhancedTimeEstimate === '1-3' ? '5-10 days' : 
+                                          enhancedTimeEstimate === '3-5' ? '7-12 days' : enhancedTimeEstimate;
+                    console.log(`[Volume Reality] ${itemName}: Pricing above recent 7d average with limited volume (7d: ${recentVolume7d}) - adjusted time estimate: ${enhancedTimeEstimate}`);
+                }
+            }
+            
+            // For any item with extremely low recent volume, prevent overly optimistic estimates
+            if (recentVolume7d <= 1 && enhancedTimeEstimate === '1-3') {
+                enhancedTimeEstimate = '7-14 days';
+                console.log(`[Volume Reality] ${itemName}: Only ${recentVolume7d} sale(s) in 7 days - preventing overly optimistic 1-3 day estimate`);
             }
             
             // Calculate market metrics for volatility display
