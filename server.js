@@ -310,15 +310,83 @@ function createOptimalBatches(uniqueItems, maxUrlLength = 7000) {
 }
 
 /**
- * Fetches Skinport current market listings for multiple items in a single API call
+ * Fetches ALL Skinport items with current market data (prices, quantities)
  */
-async function fetchSkinportListingsBatch(marketHashNames, currency) {
-    // Validate and clean market hash names - MUCH MORE PERMISSIVE
+async function fetchAllSkinportItems(currency) {
+    const cacheKey = `all_items_${currency}`;
+    const cachedData = cache.get(cacheKey);
+
+    if (cachedData) {
+        console.log(`[Cache] All items cache hit`);
+        return cachedData;
+    }
+
+    try {
+        await waitForRateLimit();
+        
+        const params = new URLSearchParams({
+            app_id: APP_ID_CSGO,
+            currency: currency
+        });
+        
+        const url = `${SKINPORT_API_URL}/items?${params}`;
+        console.log(`[API Call] Fetching ALL Skinport items for current market data`);
+        
+        const response = await fetch(url, {
+            method: 'GET',
+            headers: {
+                'Accept-Encoding': 'br',
+                'Accept': 'application/json',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+        });
+        
+        if (!response.ok) {
+            console.error(`[API Error] Failed to fetch all Skinport items. Status: ${response.status}`);
+            return {};
+        }
+
+        const data = await response.json();
+        console.log(`[API Response] Received ${data.length} total Skinport items`);
+        
+        // Convert to lookup object by market_hash_name
+        const itemsLookup = {};
+        data.forEach(item => {
+            if (item.market_hash_name) {
+                itemsLookup[item.market_hash_name] = {
+                    market_hash_name: item.market_hash_name,
+                    min_price: item.min_price,
+                    max_price: item.max_price,
+                    mean_price: item.mean_price,
+                    median_price: item.median_price,
+                    quantity: item.quantity,
+                    created_at: item.created_at,
+                    updated_at: item.updated_at
+                };
+            }
+        });
+        
+        // Cache for 5 minutes
+        cache.set(cacheKey, itemsLookup);
+        console.log(`[Cache] All items cached: ${Object.keys(itemsLookup).length} items`);
+        
+        return itemsLookup;
+        
+    } catch (error) {
+        console.error(`[Data Collection] Error fetching all Skinport items: ${error.message}`);
+        return {};
+    }
+}
+
+/**
+ * Fetches sales history for multiple items in a single API call
+ */
+async function fetchSalesHistoryBatch(marketHashNames, currency) {
+    // Validate and clean market hash names
     const validNames = marketHashNames.filter(name => {
         const isValid = typeof name === 'string' && 
                        name.trim().length > 0 && 
-                       name.length < 200; // Increased length limit
-                       // REMOVED overly strict character filtering
+                       name.length < 200;
         
         if (!isValid) {
             console.log(`[API] Skipping invalid market_hash_name: ${name}`);
@@ -331,18 +399,17 @@ async function fetchSkinportListingsBatch(marketHashNames, currency) {
         return {};
     }
 
-    const batchKey = `batch_${validNames.sort().join(',')}_${currency}`;
+    const batchKey = `sales_history_${validNames.sort().join(',')}_${currency}`;
     const cachedData = cache.get(batchKey);
 
     if (cachedData) {
-        console.log(`[Cache] Batch cache hit for ${validNames.length} items`);
+        console.log(`[Cache] Sales history cache hit for ${validNames.length} items`);
         return cachedData;
     }
 
     try {
         await waitForRateLimit();
         
-        // Let URLSearchParams handle the encoding automatically
         const marketHashNamesParam = validNames.join(',');
             
         const params = new URLSearchParams({
@@ -351,10 +418,9 @@ async function fetchSkinportListingsBatch(marketHashNames, currency) {
             market_hash_name: marketHashNamesParam
         });
         
-        const url = `${SKINPORT_API_URL}/items?${params}`;
-        console.log(`[API Call] Fetching Skinport listings for batch of ${validNames.length} items`);
+        const url = `${SKINPORT_API_URL}/sales/history?${params}`;
+        console.log(`[API Call] Fetching sales history for batch of ${validNames.length} items`);
         console.log(`[API Call] Sample names:`, validNames.slice(0, 3));
-        console.log(`[API Call] Full URL:`, url.substring(0, 300) + '...');
         
         const response = await fetch(url, {
             method: 'GET',
@@ -367,15 +433,14 @@ async function fetchSkinportListingsBatch(marketHashNames, currency) {
         
         if (!response.ok) {
             const responseText = await response.text();
-            console.error(`[API Error] Failed to fetch Skinport listings. Status: ${response.status} ${response.statusText}`);
+            console.error(`[API Error] Failed to fetch sales history. Status: ${response.status} ${response.statusText}`);
             console.error(`[API Error] Response body: ${responseText.substring(0, 200)}...`);
             
             // Add retry logic for 502 errors
             if (response.status === 502) {
                 console.log('[API Error] Received 502 Bad Gateway, waiting 5 seconds before retry...');
-                await delay(5000); // Wait 5 seconds
+                await delay(5000);
                 
-                // Try the request again
                 const retryResponse = await fetch(url, {
                     method: 'GET',
                     headers: {
@@ -396,89 +461,26 @@ async function fetchSkinportListingsBatch(marketHashNames, currency) {
         }
 
         const data = await response.json();
-        console.log(`[API Response] Received data type:`, Array.isArray(data) ? 'Array' : typeof data);
-        console.log(`[API Response] Data length/keys:`, Array.isArray(data) ? data.length : Object.keys(data).length);
-        console.log(`[API Response] Sample data:`, JSON.stringify(data).substring(0, 200) + '...');
+        console.log(`[API Response] Sales history received for ${data.length} items`);
         
         // Convert array response to object with market_hash_name as key
         const batchData = {};
         if (Array.isArray(data)) {
-            console.log(`[API Response] Processing ${data.length} Skinport listings from API`);
-            console.log(`[API Response] First 3 API item names:`, data.slice(0, 3).map(item => item.market_hash_name));
-            
             data.forEach(item => {
                 if (item.market_hash_name) {
-                    // Process Skinport listing data - find lowest prices
-                    const processedItem = {
-                        market_hash_name: item.market_hash_name,
-                        listings: item.items || [],
-                        lowestPrice: null,
-                        averagePrice: null,
-                        highestPrice: null,
-                        listingCount: 0
-                    };
-                    
-                    if (processedItem.listings && processedItem.listings.length > 0) {
-                        const prices = processedItem.listings.map(listing => listing.price).filter(p => p > 0);
-                        if (prices.length > 0) {
-                            processedItem.lowestPrice = Math.min(...prices);
-                            processedItem.averagePrice = prices.reduce((a, b) => a + b, 0) / prices.length;
-                            processedItem.highestPrice = Math.max(...prices);
-                            processedItem.listingCount = prices.length;
-                        }
-                    }
-                    
-                    batchData[item.market_hash_name] = processedItem;
+                    batchData[item.market_hash_name] = item;
                 }
             });
-            
-            // Debug: Show which requested items were found vs missing
-            console.log(`[API Response] Requested ${validNames.length} items, got ${Object.keys(batchData).length} responses`);
-            
-            const foundItems = Object.keys(batchData);
-            const missingItems = validNames.filter(name => !foundItems.includes(name));
-            
-            // Debug StatTrak items specifically
-            const requestedStatTrak = validNames.filter(name => name.includes('StatTrak'));
-            const receivedStatTrak = foundItems.filter(name => name.includes('StatTrak'));
-            
-            if (requestedStatTrak.length > 0) {
-                console.log(`[API Debug] StatTrak requested (${requestedStatTrak.length}):`, requestedStatTrak.slice(0, 3));
-                console.log(`[API Debug] StatTrak received (${receivedStatTrak.length}):`, receivedStatTrak.slice(0, 3));
-                
-                // Check for exact mismatches
-                const missingStatTrak = requestedStatTrak.filter(name => !foundItems.includes(name));
-                if (missingStatTrak.length > 0) {
-                    console.log(`[API Debug] Missing StatTrak items (${missingStatTrak.length}):`, missingStatTrak.slice(0, 3));
-                    
-                    // Try to find similar names in the API response for first missing item
-                    const firstMissing = missingStatTrak[0];
-                    const weaponPart = firstMissing.split('|')[1]?.trim().split('(')[0]?.trim();
-                    if (weaponPart) {
-                        const similarNames = foundItems.filter(apiName => 
-                            apiName.includes('StatTrak') && 
-                            apiName.toLowerCase().includes(weaponPart.toLowerCase())
-                        );
-                        if (similarNames.length > 0) {
-                            console.log(`[API Debug] Similar names for "${firstMissing}":`, similarNames);
-                        }
-                    }
-                }
-            }
-            
-            if (missingItems.length > 0) {
-                console.log(`[API Response] Missing items (${missingItems.length}):`, missingItems.slice(0, 5));
-            }
         }
         
         // Cache the batch response
         cache.set(batchKey, batchData);
-        console.log(`[Cache] Batch cache set for ${validNames.length} items`);
+        console.log(`[Cache] Sales history cached for ${validNames.length} items`);
         
         return batchData;
         
     } catch (error) {
-        console.error(`[Data Collection] Error fetching Skinport listings: ${error.message}`);
+        console.error(`[Data Collection] Error fetching sales history: ${error.message}`);
         return {};
     }
 }
@@ -521,81 +523,105 @@ app.post('/analyze-prices', async (req, res) => {
             });
         }
 
-        // Create optimal batches
+        // Fetch BOTH current market data AND sales history
+        console.log(`[Backend] Fetching current market data for all items...`);
+        const allMarketData = await fetchAllSkinportItems(settings.currency || 'EUR');
+        
+        console.log(`[Backend] Fetching sales history in batches...`);
         const batches = createOptimalBatches(uniqueNames);
         console.log(`[Backend] Split into ${batches.length} batches.`);
 
-        // Fetch Skinport listing data for all batches
-        const allListingData = {};
+        // Fetch sales history for all batches
+        const allSalesData = {};
         for (let i = 0; i < batches.length; i++) {
-            console.log(`[Backend] Processing batch ${i + 1}/${batches.length} (${batches[i].length} items)`);
-            const batchData = await fetchSkinportListingsBatch(batches[i], settings.currency || 'EUR');
-            Object.assign(allListingData, batchData);
+            console.log(`[Backend] Processing sales history batch ${i + 1}/${batches.length} (${batches[i].length} items)`);
+            const batchData = await fetchSalesHistoryBatch(batches[i], settings.currency || 'EUR');
+            Object.assign(allSalesData, batchData);
             
-            // Longer delay between batches to be more conservative with rate limiting
+            // Delay between batches for rate limiting
             if (i < batches.length - 1) {
                 console.log(`[Backend] Waiting 3 seconds before next batch...`);
-                await delay(3000); // Increased from 100ms to 3 seconds
+                await delay(3000);
             }
         }
 
-        console.log(`[Backend] Got Skinport listing data for ${Object.keys(allListingData).length} items.`);
+        console.log(`[Backend] Got market data for ${Object.keys(allMarketData).length} items`);
+        console.log(`[Backend] Got sales history for ${Object.keys(allSalesData).length} items`);
         
-        // Debug which StatTrak items got Skinport listing data
+        // Debug which items got both market and sales data
         if (statTrakItems.length > 0) {
-            console.log(`[StatTrak Debug] Skinport Listings Response check:`);
+            console.log(`[StatTrak Debug] Data availability check:`);
             statTrakItems.slice(0, 3).forEach(item => {
                 const itemName = item.marketHashName || item.name;
-                const hasData = allListingData[itemName];
-                console.log(`  - "${itemName}": ${hasData ? 'HAS DATA' : 'NO DATA'}`);
-                if (!hasData) {
-                    // Check if a similar name exists in the response
-                    const similarKeys = Object.keys(allListingData).filter(key => 
-                        key.toLowerCase().includes(itemName.toLowerCase().replace(/[★™]/g, '').trim())
-                    );
-                    if (similarKeys.length > 0) {
-                        console.log(`    Similar keys found: ${similarKeys.slice(0, 2)}`);
-                    }
-                }
+                const hasMarketData = allMarketData[itemName];
+                const hasSalesData = allSalesData[itemName];
+                console.log(`  - "${itemName}": Market=${hasMarketData ? 'YES' : 'NO'}, Sales=${hasSalesData ? 'YES' : 'NO'}`);
             });
         }
 
-        // Analyze each item for profitability
+        // Analyze each item for profitability using BOTH current market + sales history
         for (const item of items) {
             const itemName = item.marketHashName || item.name;
             const itemPrice = item.price || item.skinportPrice;
             
             if (!itemName || !itemPrice) continue;
 
-            const listingData = allListingData[itemName];
-            if (!listingData || !listingData.lowestPrice) {
-                console.log(`[Backend] No Skinport listing data for: ${itemName}`);
+            // Get both current market data AND sales history
+            const marketData = allMarketData[itemName];
+            const salesData = allSalesData[itemName];
+            
+            if (!marketData) {
+                console.log(`[Backend] No current market data for: ${itemName}`);
+                continue;
+            }
+            
+            if (!salesData) {
+                console.log(`[Backend] No sales history for: ${itemName}`);
                 continue;
             }
 
-            // Debug: Log the actual structure of listingData for first few items
+            // Debug: Log the structure for first few items
             if (analyzedItems.length < 3) {
-                console.log(`[Debug] ListingData structure for "${itemName}":`, JSON.stringify(listingData, null, 2));
+                console.log(`[Debug] Market data for "${itemName}":`, JSON.stringify(marketData, null, 2));
+                console.log(`[Debug] Sales data for "${itemName}":`, JSON.stringify(salesData, null, 2).substring(0, 500) + '...');
             }
 
-            // Use Skinport listing data for profit analysis
-            const lowestSellPrice = listingData.lowestPrice;
-            const avgSellPrice = listingData.averagePrice;
-            const highestSellPrice = listingData.highestPrice;
-            const listingCount = listingData.listingCount;
-            // Calculate profit potential based on Skinport buy vs sell prices
+            // Extract current market data (what people are selling for NOW)
+            const currentMinPrice = marketData.min_price;
+            const currentMaxPrice = marketData.max_price;
+            const currentMeanPrice = marketData.mean_price;
+            const currentMedianPrice = marketData.median_price;
+            const currentQuantity = marketData.quantity;
+            
+            if (!currentMinPrice || currentMinPrice <= 0) {
+                console.log(`[Backend] No valid current market price for: ${itemName}`);
+                continue;
+            }
+
+            // Extract sales history data (what actually sold recently)
+            let priceData = null;
+            if (salesData.last_30_days && salesData.last_30_days.volume > 0) {
+                priceData = salesData.last_30_days;
+            } else if (salesData.last_90_days && salesData.last_90_days.volume > 0) {
+                priceData = salesData.last_90_days;
+            } else if (salesData.last_7_days && salesData.last_7_days.volume > 0) {
+                priceData = salesData.last_7_days;
+            } else {
+                console.log(`[Backend] No usable sales history for: ${itemName}`);
+                continue;
+            }
+            // HYBRID APPROACH: Use current market prices for competition, sales history for validation
             const skinportBuyPrice = typeof itemPrice === 'number' ? itemPrice : parseFloat(itemPrice.toString().replace(',', '.'));
             
-            // For Skinport flipping, we compare buy price to current sell listings
-            // We need to undercut the lowest listing to sell quickly
-            const competitiveSellPrice = lowestSellPrice * 0.95; // Undercut by 5% for quick sale
-            const conservativeSellPrice = lowestSellPrice * 0.90; // Undercut by 10% for guaranteed sale
-            const aggressiveSellPrice = lowestSellPrice * 0.98; // Undercut by 2% for maximum profit
+            // Strategy: Undercut current market to sell quickly, but validate with sales history
+            const competitiveSellPrice = currentMinPrice * 0.95; // Undercut lowest current listing by 5%
+            const conservativeSellPrice = currentMinPrice * 0.90; // Undercut by 10% for guaranteed sale
+            const aggressiveSellPrice = currentMinPrice * 0.98;   // Undercut by 2% for maximum profit
             
             // After Skinport's 8% seller fee
-            const netCompetitivePrice = competitiveSellPrice * 0.92;
-            const netConservativePrice = conservativeSellPrice * 0.92;
-            const netAggressivePrice = aggressiveSellPrice * 0.92;
+            const netCompetitivePrice = competitiveSellPrice * (1 - SKINPORT_FEE);
+            const netConservativePrice = conservativeSellPrice * (1 - SKINPORT_FEE);
+            const netAggressivePrice = aggressiveSellPrice * (1 - SKINPORT_FEE);
             
             // Calculate profits for different strategies
             const competitiveProfit = netCompetitivePrice - skinportBuyPrice;
@@ -606,62 +632,106 @@ app.post('/analyze-prices', async (req, res) => {
             const conservativeProfitPercentage = (conservativeProfit / skinportBuyPrice) * 100;
             const aggressiveProfitPercentage = (aggressiveProfit / skinportBuyPrice) * 100;
             
-            // Advanced variance and volatility analysis based on current listings
-            const priceRange = highestSellPrice - lowestSellPrice;
-            const coefficientOfVariation = (priceRange / avgSellPrice) * 100; // CV as percentage
+            // Validate pricing against sales history
+            const salesAvgPrice = priceData.avg;
+            const salesMinPrice = priceData.min;
+            const salesMaxPrice = priceData.max;
+            const salesVolume = priceData.volume;
             
-            console.log(`[Skinport Analysis] ${itemName}:`);
+            // Check if our selling prices are realistic based on what actually sold
+            const isPriceRealistic = competitiveSellPrice >= salesMinPrice && competitiveSellPrice <= salesMaxPrice;
+            const pricePosition = (competitiveSellPrice - salesMinPrice) / (salesMaxPrice - salesMinPrice);
+            
+            // Market analysis combining current listings + sales history
+            const currentMarketSpread = currentMaxPrice - currentMinPrice;
+            const salesHistorySpread = salesMaxPrice - salesMinPrice;
+            const marketVolatility = (currentMarketSpread / currentMeanPrice) * 100;
+            const salesVolatility = (salesHistorySpread / salesAvgPrice) * 100;
+            
+            console.log(`[Hybrid Analysis] ${itemName}:`);
             console.log(`  Buy Price: €${skinportBuyPrice.toFixed(2)}`);
-            console.log(`  Sell Range: €${lowestSellPrice.toFixed(2)} - €${highestSellPrice.toFixed(2)} (${listingCount} listings)`);
-            console.log(`  Aggressive (2% undercut): €${aggressiveSellPrice.toFixed(2)} → €${netAggressivePrice.toFixed(2)} net → €${aggressiveProfit.toFixed(2)} profit (${aggressiveProfitPercentage.toFixed(1)}%)`);
-            console.log(`  Competitive (5% undercut): €${competitiveSellPrice.toFixed(2)} → €${netCompetitivePrice.toFixed(2)} net → €${competitiveProfit.toFixed(2)} profit (${competitiveProfitPercentage.toFixed(1)}%)`);
-            console.log(`  Conservative (10% undercut): €${conservativeSellPrice.toFixed(2)} → €${netConservativePrice.toFixed(2)} net → €${conservativeProfit.toFixed(2)} profit (${conservativeProfitPercentage.toFixed(1)}%)`);
+            console.log(`  Current Market: €${currentMinPrice.toFixed(2)} - €${currentMaxPrice.toFixed(2)} (${currentQuantity} listings)`);
+            console.log(`  Sales History: €${salesMinPrice.toFixed(2)} - €${salesMaxPrice.toFixed(2)} (${salesVolume} sales, avg: €${salesAvgPrice.toFixed(2)})`);
+            console.log(`  Competitive Strategy: €${competitiveSellPrice.toFixed(2)} → €${netCompetitivePrice.toFixed(2)} net → €${competitiveProfit.toFixed(2)} profit (${competitiveProfitPercentage.toFixed(1)}%)`);
+            console.log(`  Price Validation: Realistic=${isPriceRealistic}, Position=${(pricePosition * 100).toFixed(0)}% of sales range`);
             
-            // Use competitive strategy for main analysis (5% undercut is balanced)
+            // Use competitive strategy for main analysis
             const achievablePrice = competitiveSellPrice;
             const netAchievablePrice = netCompetitivePrice;
             const profitAmount = competitiveProfit;
             const profitPercentage = competitiveProfitPercentage;
             
-            // Skip items with no profit potential
+            // Skip items with no profit potential or unrealistic pricing
             if (profitAmount <= 0) {
-                console.log(`[Skinport] ${itemName}: No profit potential - skipping`);
+                console.log(`[Hybrid] ${itemName}: No profit potential - skipping`);
+                continue;
+            }
+            
+            if (!isPriceRealistic) {
+                console.log(`[Hybrid] ${itemName}: Unrealistic pricing based on sales history - skipping`);
                 continue;
             }
 
-            // Enhanced profit validation - SIMPLIFIED for Skinport-to-Skinport trading
+            // Enhanced validation using BOTH current market + sales history
             const minProfitAmount = parseFloat(settings.minProfitAmount || 0);
             const minProfitPercentage = parseFloat(settings.minProfitPercentage || 0);
             
-            // Basic criteria: does it meet minimum profit requirements?
+            // Basic profit criteria
             const meetsBasicCriteria = profitAmount >= minProfitAmount && profitPercentage >= minProfitPercentage;
             
-            // Listing quality: how many competing sellers are there?
-            const hasGoodLiquidity = listingCount >= 2 && listingCount <= 20; // Sweet spot: not too few, not too many
-            const liquidityRating = listingCount >= 10 ? 'HIGH' : listingCount >= 5 ? 'MEDIUM' : listingCount >= 2 ? 'LOW' : 'VERY_LOW';
+            // Market competition analysis (current listings)
+            const hasGoodCompetition = currentQuantity >= 2 && currentQuantity <= 25; // Sweet spot for competition
+            const competitionRating = currentQuantity >= 15 ? 'HIGH' : currentQuantity >= 8 ? 'MEDIUM' : currentQuantity >= 2 ? 'LOW' : 'VERY_LOW';
             
-            // Price stability: how spread out are the current listings?
-            const priceStability = listingCount > 1 ? Math.max(0, 100 - coefficientOfVariation) : 50;
-            const isStable = priceStability >= 30; // 30% is reasonable for current market conditions
+            // Sales volume analysis (historical data)  
+            const hasGoodVolume = salesVolume >= 10; // At least 10 sales in the period
+            const volumeRating = salesVolume >= 50 ? 'HIGH' : salesVolume >= 20 ? 'MEDIUM' : salesVolume >= 10 ? 'LOW' : 'VERY_LOW';
             
-            console.log(`[Validation] ${itemName}: Profit=${profitAmount.toFixed(2)}€ (${profitPercentage.toFixed(1)}%), Listings=${listingCount}, Stability=${priceStability.toFixed(1)}%`);
-            console.log(`[Validation] Criteria: Basic=${meetsBasicCriteria}, Liquidity=${hasGoodLiquidity}, Stable=${isStable}`);
+            // Price stability (how volatile the market is)
+            const priceStability = Math.max(0, 100 - Math.max(marketVolatility, salesVolatility));
+            const isStable = priceStability >= 30;
             
-            if (meetsBasicCriteria && hasGoodLiquidity && isStable) {
+            // Weekly flip viability analysis
+            const weeklyFlipViability = analyzeWeeklyFlipViability(itemName, priceData, salesData, 'STABLE', priceStability);
+            const meetsWeeklyFlipCriteria = weeklyFlipViability.score >= 25;
+            
+            console.log(`[Validation] ${itemName}:`);
+            console.log(`  Profit: €${profitAmount.toFixed(2)} (${profitPercentage.toFixed(1)}%)`);
+            console.log(`  Competition: ${currentQuantity} listings (${competitionRating}), Volume: ${salesVolume} sales (${volumeRating})`);
+            console.log(`  Stability: ${priceStability.toFixed(1)}%, Weekly Viability: ${weeklyFlipViability.score}/100`);
+            console.log(`  Criteria: Basic=${meetsBasicCriteria}, Competition=${hasGoodCompetition}, Volume=${hasGoodVolume}, Stable=${isStable}, WeeklyFlip=${meetsWeeklyFlipCriteria}`);
+            
+            if (meetsBasicCriteria && hasGoodCompetition && hasGoodVolume && isStable && meetsWeeklyFlipCriteria) {
                 analyzedItems.push({
                     ...item,
                     name: itemName,
                     skinportPrice: itemPrice,
-                    skinportLowestSell: lowestSellPrice.toFixed(2),
-                    skinportAvgSell: avgSellPrice.toFixed(2),
-                    skinportHighestSell: highestSellPrice.toFixed(2),
+                    
+                    // Current market data (what's listed now)
+                    currentMinPrice: currentMinPrice.toFixed(2),
+                    currentMaxPrice: currentMaxPrice.toFixed(2),
+                    currentMeanPrice: currentMeanPrice.toFixed(2),
+                    currentMedianPrice: currentMedianPrice.toFixed(2),
+                    currentQuantity: currentQuantity,
+                    
+                    // Sales history data (what actually sold)
+                    salesAvgPrice: salesAvgPrice.toFixed(2),
+                    salesMinPrice: salesMinPrice.toFixed(2),
+                    salesMaxPrice: salesMaxPrice.toFixed(2),
+                    salesVolume: salesVolume,
+                    
+                    // Profit calculations
                     achievablePrice: netAchievablePrice.toFixed(2), // What you'll actually get after fees
                     grossAchievablePrice: achievablePrice.toFixed(2), // What to list at before fees
                     profitAmount: profitAmount.toFixed(2),
                     profitPercentage: profitPercentage.toFixed(1),
-                    listingCount: listingCount,
+                    
+                    // Market analysis
                     priceStability: priceStability.toFixed(1),
-                    liquidityRating: liquidityRating,
+                    competitionRating: competitionRating,
+                    volumeRating: volumeRating,
+                    isPriceRealistic: isPriceRealistic,
+                    pricePosition: (pricePosition * 100).toFixed(0),
                     
                     // Strategy details
                     strategies: {
@@ -685,6 +755,9 @@ app.post('/analyze-prices', async (req, res) => {
                         }
                     },
                     
+                    // Weekly flip analysis
+                    weeklyFlipViability: weeklyFlipViability,
+                    
                     recommendation: profitPercentage > 20 ? 'STRONG_BUY' : 
                                    profitPercentage > 10 ? 'BUY' : 
                                    profitPercentage > 5 ? 'CONSIDER' : 'HOLD'
@@ -692,14 +765,14 @@ app.post('/analyze-prices', async (req, res) => {
                 
                 console.log(`[Enhanced Profit] ${itemName}:`);
                 console.log(`  Profit: €${profitAmount.toFixed(2)} (${profitPercentage.toFixed(1)}%)`);
-                console.log(`  Risk: ${liquidityRating}, Confidence: ${priceStability.toFixed(1)}%, Listings: ${listingCount}`);
-                console.log(`  Liquidity: ${liquidityRating}, Trend: STABLE`);
+                console.log(`  Risk: ${competitionRating}, Confidence: ${priceStability.toFixed(1)}%, Listings: ${currentQuantity}`);
+                console.log(`  Liquidity: ${volumeRating}, Trend: STABLE`);
             } else if (profitAmount >= -2.0) {
                 // Log items that are close to profitable for debugging
                 console.log(`[Almost Profitable] ${itemName}:`);
-                console.log(`  Buy Price: €${skinportBuyPrice.toFixed(2)}, Lowest Sell: €${lowestSellPrice.toFixed(2)}, After Fees: €${netAchievablePrice.toFixed(2)}`);
+                console.log(`  Buy Price: €${skinportBuyPrice.toFixed(2)}, Current Min: €${currentMinPrice.toFixed(2)}, After Fees: €${netAchievablePrice.toFixed(2)}`);
                 console.log(`  Profit: €${profitAmount.toFixed(2)} (${profitPercentage.toFixed(1)}%) - Missing profit by €${Math.abs(profitAmount).toFixed(2)}`);
-                console.log(`  Failed criteria: Basic=${meetsBasicCriteria}, Liquidity=${hasGoodLiquidity}, Stable=${isStable}`);
+                console.log(`  Failed criteria: Basic=${meetsBasicCriteria}, Competition=${hasGoodCompetition}, Volume=${hasGoodVolume}, Stable=${isStable}, WeeklyFlip=${meetsWeeklyFlipCriteria}`);
                 console.log(`  This item needs €${Math.abs(profitAmount + 1.0).toFixed(2)} less buy price to be profitable`);
             }
         }
@@ -712,8 +785,10 @@ app.post('/analyze-prices', async (req, res) => {
                 totalProcessed: items.length,
                 profitableFound: analyzedItems.length,
                 uniqueItemsChecked: uniqueNames.length,
-                listingDataFound: Object.keys(allListingData).length,
-                batchesProcessed: batches.length
+                marketDataFound: Object.keys(allMarketData).length,
+                salesDataFound: Object.keys(allSalesData).length,
+                strategy: 'Hybrid Skinport market + sales history analysis',
+                timeframe: '3-7 day flip trading'
             }
         });
     } catch (error) {
