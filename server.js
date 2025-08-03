@@ -353,18 +353,33 @@ app.post('/analyze-prices', async (req, res) => {
                 console.log(`[Debug] SalesData structure for "${itemName}":`, JSON.stringify(salesData, null, 2));
             }
 
-            // The salesData is the item object, not an array of sales
-            // We need to check if it has sales history data
-            if (!salesData.sales || !Array.isArray(salesData.sales) || salesData.sales.length === 0) {
-                console.log(`[Backend] No sales history for: ${itemName}`);
+            // The Skinport API returns aggregated data, not individual sales
+            // Use the most recent period with data (prefer 30 days, fallback to 90 days)
+            let priceData = null;
+            if (salesData.last_30_days && salesData.last_30_days.volume > 0 && salesData.last_30_days.avg !== null) {
+                priceData = salesData.last_30_days;
+                console.log(`[Backend] Using 30-day data for: ${itemName}`);
+            } else if (salesData.last_90_days && salesData.last_90_days.volume > 0 && salesData.last_90_days.avg !== null) {
+                priceData = salesData.last_90_days;
+                console.log(`[Backend] Using 90-day data for: ${itemName}`);
+            } else if (salesData.last_7_days && salesData.last_7_days.volume > 0 && salesData.last_7_days.avg !== null) {
+                priceData = salesData.last_7_days;
+                console.log(`[Backend] Using 7-day data for: ${itemName}`);
+            } else if (salesData.last_24_hours && salesData.last_24_hours.volume > 0 && salesData.last_24_hours.avg !== null) {
+                priceData = salesData.last_24_hours;
+                console.log(`[Backend] Using 24-hour data for: ${itemName}`);
+            }
+
+            if (!priceData) {
+                console.log(`[Backend] No usable price data for: ${itemName}`);
                 continue;
             }
 
-            // Calculate statistics from sales history
-            const prices = salesData.sales.map(sale => sale.price);
-            const avgPrice = prices.reduce((sum, price) => sum + price, 0) / prices.length;
-            const minPrice = Math.min(...prices);
-            const maxPrice = Math.max(...prices);
+            // Extract price statistics from the aggregated data
+            const avgPrice = priceData.avg;
+            const minPrice = priceData.min;
+            const maxPrice = priceData.max;
+            const volume = priceData.volume;
             
             // Calculate profit
             const skinportPriceNum = typeof itemPrice === 'number' ? itemPrice : parseFloat(itemPrice.toString().replace(',', '.'));
@@ -385,8 +400,11 @@ app.post('/analyze-prices', async (req, res) => {
                     steamMaxPrice: maxPrice.toFixed(2),
                     profitAmount: profitAmount.toFixed(2),
                     profitPercentage: profitPercentage.toFixed(1),
-                    salesCount: salesData.sales.length,
-                    lastSaleDate: salesData.sales[0]?.created_at || 'Unknown'
+                    salesCount: volume,
+                    dataSource: priceData === salesData.last_24_hours ? '24h' : 
+                               priceData === salesData.last_7_days ? '7d' : 
+                               priceData === salesData.last_30_days ? '30d' : '90d',
+                    lastSaleDate: 'Recent' // Aggregated data doesn't have specific dates
                 });
                 
                 console.log(`[Profit] Found profitable item: ${itemName} - €${profitAmount.toFixed(2)} (${profitPercentage.toFixed(1)}%)`);
