@@ -191,8 +191,8 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
         basePrice *= 0.99; // Minimal penalty from 0.97 (was 3% penalty, now 1%)
     }
     
-    // Ensure we don't price below break-even
-    const minProfitablePrice = buyPrice * 1.10; // Minimum 10% markup before fees
+    // Ensure we don't price below break-even (reduced from 10% to 5% for better opportunities)
+    const minProfitablePrice = buyPrice * 1.05; // Minimum 5% markup before fees
     if (basePrice < minProfitablePrice) {
         basePrice = minProfitablePrice;
         reasoning += ', adjusted to minimum profitable price';
