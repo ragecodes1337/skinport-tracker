@@ -383,9 +383,42 @@ app.post('/analyze-prices', async (req, res) => {
             // Advanced variance and volatility analysis (for information only)
             const priceRange = maxPrice - minPrice;
             const coefficientOfVariation = (priceRange / avgPrice) * 100; // CV as percentage
-            const priceStability = 100 - Math.min(coefficientOfVariation, 100); // Stability score 0-100
             
-            console.log(`[Variance] ${itemName}: CV=${coefficientOfVariation.toFixed(1)}%, Range=${priceRange.toFixed(2)}, Stability=${priceStability.toFixed(1)}%`);
+            // IMPROVED: Price-tier aware stability calculation with special case handling
+            let priceStability;
+            
+            // Special handling for very high volume, low-price items (cases, stickers, etc.)
+            if (avgPrice < 2.0 && volume >= 1000) {
+                // For high-volume cases/consumables, focus on volume rather than price stability
+                // Use much more lenient stability calculation
+                const veryLenientCV = Math.min(coefficientOfVariation * 0.3, 100); // Reduce impact by 70%
+                priceStability = Math.max(100 - veryLenientCV, 20); // Minimum 20% stability for high-volume items
+                console.log(`[Stability] ${itemName}: High-volume case detected, using lenient calculation`);
+            } else if (avgPrice < 1.0) {
+                // For other items under €1 (like cases), use less strict stability calculation
+                const adjustedCV = Math.min(coefficientOfVariation * 0.6, 100); // Reduce impact by 40%
+                priceStability = 100 - adjustedCV;
+            } else if (avgPrice < 50.0) {
+                // For mid-range items (€1-50), standard calculation
+                priceStability = 100 - Math.min(coefficientOfVariation, 100);
+            } else if (avgPrice < 500.0) {
+                // For expensive items (€50-500), be stricter about volatility
+                const stricterCV = Math.min(coefficientOfVariation * 1.3, 100); // Increase impact by 30%
+                priceStability = 100 - stricterCV;
+            } else {
+                // For very expensive items (€500+), be very strict about volatility
+                const veryStrictCV = Math.min(coefficientOfVariation * 1.6, 100); // Increase impact by 60%
+                priceStability = 100 - veryStrictCV;
+                
+                // Additional penalty for absolute price swings on expensive items
+                const absoluteSwingPenalty = Math.min((priceRange / avgPrice) * 50, 30); // Up to 30% penalty
+                priceStability = Math.max(priceStability - absoluteSwingPenalty, 0);
+            }
+            
+            // Ensure stability is never negative
+            priceStability = Math.max(priceStability, 0);
+            
+            console.log(`[Variance] ${itemName}: CV=${coefficientOfVariation.toFixed(1)}%, Range=${priceRange.toFixed(2)}, Stability=${priceStability.toFixed(1)}%, AvgPrice=${avgPrice.toFixed(2)}, Volume=${volume}, PriceTier=${avgPrice >= 500 ? 'VERY_HIGH' : avgPrice >= 50 ? 'HIGH' : avgPrice >= 1 ? 'MID' : 'LOW'}`);
             
             // REMOVED - Skip items with extreme variance (this was eliminating too many items)
             // if (coefficientOfVariation > 50) {
@@ -440,29 +473,106 @@ app.post('/analyze-prices', async (req, res) => {
             const hasRecentActivity = salesData.last_7_days && salesData.last_7_days.volume >= 3;
             const volumeConsistency = hasRecentActivity ? 'CONSISTENT' : 'SPORADIC';
             
-            // MUCH MORE RELAXED liquidity criteria to find more items
-            if (volume >= 5 && priceStability > 30) {
-                liquidityRating = 'GOOD';
-                achievablePrice = conservativePrice * 0.96; // 4% discount for quick sale
-                profitConfidence = Math.min(90, 50 + (priceStability * 0.4) + (volume * 2.0));
-                riskLevel = 'LOW';
-            } else if (volume >= 3 && priceStability > 20) {
-                liquidityRating = 'MEDIUM';
-                achievablePrice = conservativePrice * 0.93; // 7% discount
-                profitConfidence = Math.min(75, 35 + (priceStability * 0.4) + (volume * 3.0));
-                riskLevel = hasRecentActivity ? 'MEDIUM' : 'MEDIUM_HIGH';
-            } else if (volume >= 2 && priceStability > 15) {
-                liquidityRating = 'POOR';
-                achievablePrice = conservativePrice * 0.89; // 11% discount
-                profitConfidence = Math.min(60, 25 + (priceStability * 0.4) + (volume * 4.0));
-                riskLevel = 'HIGH';
+            // ENHANCED: Volume-first liquidity criteria with special case handling
+            let isHighVolumeItem = false;
+            let isUltraHighVolumeItem = volume >= 1000; // Cases, popular consumables
+            let volumeThreshold = {
+                good: 5,
+                medium: 3, 
+                poor: 2
+            };
+            
+            // Handle ultra-high-volume items first (cases, stickers, etc.)
+            if (isUltraHighVolumeItem) {
+                console.log(`[Liquidity] ${itemName}: Ultra-high-volume item detected (${volume} sales)`);
+                if (volume >= 10000) {
+                    liquidityRating = 'GOOD';
+                    achievablePrice = conservativePrice * 0.98; // Only 2% discount for ultra-high volume
+                    profitConfidence = Math.min(95, 80 + Math.min(volume * 0.001, 15)); // Volume-based confidence
+                    riskLevel = 'LOW';
+                } else if (volume >= 5000) {
+                    liquidityRating = 'GOOD';
+                    achievablePrice = conservativePrice * 0.97; // 3% discount
+                    profitConfidence = Math.min(90, 75 + Math.min(volume * 0.002, 15));
+                    riskLevel = 'LOW';
+                } else if (volume >= 1000) {
+                    liquidityRating = 'GOOD';
+                    achievablePrice = conservativePrice * 0.96; // 4% discount
+                    profitConfidence = Math.min(85, 70 + Math.min(volume * 0.005, 15));
+                    riskLevel = priceStability > 30 ? 'LOW' : 'MEDIUM';
+                }
             } else {
-                liquidityRating = 'VERY_POOR';
-                // Even risky items can be profitable if price is right
-                achievablePrice = conservativePrice * 0.85;
-                profitConfidence = Math.min(50, 20 + (priceStability * 0.3) + (volume * 5.0));
-                riskLevel = 'VERY_HIGH';
+                // Adjust volume requirements based on price tier for regular items
+                if (avgPrice >= 1000) {
+                    // Very expensive items (€1000+) need much higher volume for good liquidity
+                    volumeThreshold = { good: 50, medium: 20, poor: 10 };
+                    isHighVolumeItem = volume >= 50;
+                } else if (avgPrice >= 500) {
+                    // Expensive items (€500-1000) need higher volume
+                    volumeThreshold = { good: 30, medium: 15, poor: 8 };
+                    isHighVolumeItem = volume >= 30;
+                } else if (avgPrice >= 100) {
+                    // Mid-expensive items (€100-500) need moderate volume
+                    volumeThreshold = { good: 20, medium: 10, poor: 5 };
+                    isHighVolumeItem = volume >= 20;
+                } else if (avgPrice >= 10) {
+                    // Regular items (€10-100) use standard thresholds
+                    volumeThreshold = { good: 10, medium: 5, poor: 3 };
+                    isHighVolumeItem = volume >= 20;
+                } else {
+                    // Cheap items (under €10) can have lower volume requirements
+                    volumeThreshold = { good: 5, medium: 3, poor: 2 };
+                    isHighVolumeItem = volume >= 20;
+                }
+                
+                console.log(`[Liquidity] ${itemName}: Price=€${avgPrice.toFixed(2)}, Volume=${volume}, Thresholds: Good=${volumeThreshold.good}, Med=${volumeThreshold.medium}, Poor=${volumeThreshold.poor}`);
+                
+                if (isHighVolumeItem && avgPrice < 100) {
+                    // Special criteria for high-volume, lower-priced items (popular skins)
+                    if (volume >= 50) {
+                        liquidityRating = 'GOOD';
+                        achievablePrice = conservativePrice * 0.97; // Only 3% discount for very high volume
+                        profitConfidence = Math.min(90, 70 + (priceStability * 0.3) + Math.min(volume * 0.5, 20));
+                        riskLevel = 'LOW';
+                    } else if (volume >= 20) {
+                        liquidityRating = 'GOOD';
+                        achievablePrice = conservativePrice * 0.95; // 5% discount for high volume
+                        profitConfidence = Math.min(85, 60 + (priceStability * 0.3) + Math.min(volume * 0.8, 25));
+                        riskLevel = priceStability > 30 ? 'LOW' : 'MEDIUM';
+                    } else if (volume >= 10) {
+                        liquidityRating = 'MEDIUM';
+                        achievablePrice = conservativePrice * 0.93; // 7% discount
+                        profitConfidence = Math.min(75, 45 + (priceStability * 0.4) + (volume * 1.5));
+                        riskLevel = 'MEDIUM';
+                    }
+                } else {
+                    // Price-tier aware liquidity assessment
+                    if (volume >= volumeThreshold.good && priceStability > 50) {
+                        liquidityRating = 'GOOD';
+                        achievablePrice = conservativePrice * 0.96; // 4% discount for quick sale
+                        profitConfidence = Math.min(90, 50 + (priceStability * 0.4) + (volume * 2.0));
+                        riskLevel = avgPrice >= 500 ? 'MEDIUM' : 'LOW'; // Expensive items are inherently riskier
+                    } else if (volume >= volumeThreshold.medium && priceStability > 30) {
+                        liquidityRating = 'MEDIUM';
+                        achievablePrice = conservativePrice * 0.93; // 7% discount
+                        profitConfidence = Math.min(75, 35 + (priceStability * 0.4) + (volume * 3.0));
+                        riskLevel = avgPrice >= 500 ? 'HIGH' : hasRecentActivity ? 'MEDIUM' : 'MEDIUM_HIGH';
+                    } else if (volume >= volumeThreshold.poor && priceStability > 20) {
+                        liquidityRating = 'POOR';
+                        achievablePrice = conservativePrice * 0.89; // 11% discount
+                        profitConfidence = Math.min(60, 25 + (priceStability * 0.4) + (volume * 4.0));
+                        riskLevel = avgPrice >= 500 ? 'VERY_HIGH' : 'HIGH';
+                    } else {
+                        liquidityRating = 'VERY_POOR';
+                        // Even risky items can be profitable if price is right
+                        achievablePrice = conservativePrice * 0.85;
+                        profitConfidence = Math.min(50, 20 + (priceStability * 0.3) + (volume * 5.0));
+                        riskLevel = 'VERY_HIGH';
+                    }
+                }
             }
+            
+            console.log(`[Liquidity] ${itemName}: Volume=${volume}, UltraHighVol=${isUltraHighVolumeItem}, HighVol=${isHighVolumeItem}, Rating=${liquidityRating}, Risk=${riskLevel}, Confidence=${profitConfidence.toFixed(0)}%`);
             
             // Apply Skinport's 8% seller fee to achievable price
             const netAchievablePrice = achievablePrice * 0.92; // After 8% fee
