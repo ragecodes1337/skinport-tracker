@@ -397,23 +397,43 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
     console.log(`[Profitability-First] ${buyPrice.toFixed(2)} item: Need €${minProfitablePrice.toFixed(2)} minimum (${(minProfitMargin*100).toFixed(1)}% margin) [${velocityCategory}: ${weeklyVolume} sales/week, ${salesVolatility.toFixed(1)}% sales volatility]${stabilityBonus}`);
     
     // STEP 2: MARKET REALITY CHECK - Can the market support our minimum price?
-    // SMART SELECTION: Use the lower recent average if 24h is significantly above 7d trend
+    // ENHANCED SELECTION: Use more conservative recent averages, avoid outlier influence
     let recentMarketAvg;
     let selectedPeriod;
     
     if (recent24hAvg && recent7dAvg) {
-        // If 24h is more than 5% above 7d average, use 7d (more stable) - AGGRESSIVE SPIKE DETECTION
-        if (recent24hAvg > recent7dAvg * 1.05) {
+        // CRITICAL FIX: If 24h avg is significantly different from 7d avg, prefer 7d for stability
+        const priceDeviation = Math.abs(recent24hAvg - recent7dAvg) / recent7dAvg;
+        
+        if (priceDeviation > 0.15) { // 15% deviation threshold
+            // Significant difference - use 7d for stability
             recentMarketAvg = recent7dAvg;
             selectedPeriod = '7d';
-            console.log(`[Smart Recent Selection] Using 7d avg (€${recent7dAvg.toFixed(2)}) over 24h avg (€${recent24hAvg.toFixed(2)}) - 24h shows ${((recent24hAvg/recent7dAvg - 1) * 100).toFixed(1)}% spike`);
+            console.log(`[Conservative Price Selection] Using 7d avg (€${recent7dAvg.toFixed(2)}) - 24h avg (€${recent24hAvg.toFixed(2)}) shows ${(priceDeviation * 100).toFixed(1)}% deviation`);
+        } else if (recent24hAvg > recent7dAvg * 1.05) {
+            // 24h slightly above 7d - still prefer 7d for conservatism
+            recentMarketAvg = recent7dAvg;
+            selectedPeriod = '7d';
+            console.log(`[Conservative Selection] Using 7d avg (€${recent7dAvg.toFixed(2)}) over 24h avg (€${recent24hAvg.toFixed(2)}) for conservative pricing`);
         } else {
+            // Similar prices - can use 24h
             recentMarketAvg = recent24hAvg;
             selectedPeriod = '24h';
         }
     } else {
         recentMarketAvg = recent24hAvg || recent7dAvg || salesAvg;
         selectedPeriod = recent24hAvg ? '24h' : recent7dAvg ? '7d' : bestPeriod;
+    }
+    
+    // ADDITIONAL REALITY CHECK: For high volatility items, use lower percentile instead of average
+    if (salesVolatility > 100) {
+        // Use 60th percentile instead of average for high volatility items
+        const conservativePrice = salesMin + ((salesMax - salesMin) * 0.6);
+        if (conservativePrice < recentMarketAvg) {
+            console.log(`[High Volatility Adjustment] Using 60th percentile (€${conservativePrice.toFixed(2)}) instead of avg (€${recentMarketAvg.toFixed(2)}) for ${salesVolatility.toFixed(1)}% volatility item`);
+            recentMarketAvg = conservativePrice;
+            selectedPeriod += '_60P'; // Mark as percentile-adjusted
+        }
     }
     
     // REALISTIC VOLATILITY-BASED MARKET TOLERANCE: Accept real-world CS:GO market conditions
@@ -431,12 +451,17 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
             reasoning: `Extreme volatility (${salesVolatility.toFixed(1)}%) - market too unpredictable for safe trading`
         };
     } else if (salesVolatility > 120) {
-        // HIGH VOLATILITY (120-200%): Accept but be conservative - realistic CS:GO threshold
-        marketToleranceMultiplier = Math.max(salesMin * 1.05 / recentMarketAvg, 1.01); // 105% of recent min
-        volatilityCategory = 'HIGH_VOLATILITY_ACCEPTED';
-        console.log(`[HIGH VOLATILITY ACCEPTED] ${salesVolatility.toFixed(1)}% volatility - using conservative pricing but proceeding`);
+        // HIGH VOLATILITY (120-200%): Much more conservative pricing - MAJOR FIX
+        marketToleranceMultiplier = Math.max(0.95, Math.min(1.02, (salesMin * 1.02) / recentMarketAvg)); // Max 102% of recent avg, prefer near minimum
+        volatilityCategory = 'HIGH_VOLATILITY_VERY_CONSERVATIVE';
+        console.log(`[HIGH VOLATILITY CONSERVATIVE] ${salesVolatility.toFixed(1)}% volatility - using very conservative pricing (near sales minimum)`);
+    } else if (salesVolatility > 80) {
+        // MODERATE-HIGH VOLATILITY (80-120%): Conservative pricing - ENHANCED
+        marketToleranceMultiplier = 1.04; // 104% of recent average (was 108%)
+        volatilityCategory = 'MODERATE_HIGH_VOLATILITY';
+        console.log(`[MODERATE-HIGH VOLATILITY] ${salesVolatility.toFixed(1)}% volatility - conservative CS:GO pricing`);
     } else if (salesVolatility > 60) {
-        // MODERATE VOLATILITY (60-120%): Normal CS:GO market conditions
+        // MODERATE VOLATILITY (60-80%): Normal CS:GO market conditions
         marketToleranceMultiplier = 1.08; // 108% of recent average
         volatilityCategory = 'MODERATE_VOLATILITY';
         console.log(`[MODERATE VOLATILITY] ${salesVolatility.toFixed(1)}% volatility - normal CS:GO market conditions`);
@@ -463,6 +488,23 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
             strategy: 'PROFIT_IMPOSSIBLE',
             reasoning: `Minimum ${(minProfitMargin*100).toFixed(1)}% margin (€${minProfitablePrice.toFixed(2)}) exceeds ${volatilityCategory.toLowerCase()} market tolerance (€${marketTolerance.toFixed(2)} max)`
         };
+    }
+    
+    // ADDITIONAL REALITY CHECK: Buying too close to market average is risky
+    const buyVsMarketRatio = buyPrice / recentMarketAvg;
+    if (buyVsMarketRatio > 0.95) { // Buying at 95%+ of market average
+        console.log(`[HIGH RISK WARNING] Buying at €${buyPrice.toFixed(2)} vs market avg €${recentMarketAvg.toFixed(2)} (${(buyVsMarketRatio * 100).toFixed(1)}%) - limited upside potential`);
+        
+        // For high-volatility items close to market average, be extra conservative
+        if (salesVolatility > 80 && buyVsMarketRatio > 0.92) {
+            console.log(`[RISKY TRADE REJECTION] High volatility (${salesVolatility.toFixed(1)}%) + high buy ratio (${(buyVsMarketRatio * 100).toFixed(1)}%) = too risky`);
+            return {
+                achievablePrice: 0,
+                confidence: 'REJECTED',
+                strategy: 'HIGH_RISK_TRADE',
+                reasoning: `Buying at ${(buyVsMarketRatio * 100).toFixed(1)}% of market average with ${salesVolatility.toFixed(1)}% volatility - too risky for profitable trading`
+            };
+        }
     }
     
     // STEP 3: PRICING STRATEGY - Now that we know profit is possible, optimize price
@@ -685,19 +727,29 @@ function calculateOverallConfidence(marketData, multiTimeframeData, smartPricing
         }
     }
     
-    // Apply volatility penalty to liquidity score - REALISTIC PENALTIES for CS:GO
+    // Apply volatility penalty to liquidity score - ENHANCED PENALTIES for realistic trading
     const salesData = smartPricing.salesData;
     if (salesData) {
         const salesVolatility = ((salesData.max - salesData.min) / salesData.avg) * 100;
         if (salesVolatility > 150) {
-            liquidityScore = Math.max(liquidityScore - 25, 15); // Moderate penalty (was -40)
-            factors.push(`High volatility (${salesVolatility.toFixed(1)}%) - timing matters`);
+            liquidityScore = Math.max(liquidityScore - 40, 10); // Heavy penalty for extreme volatility
+            factors.push(`High volatility (${salesVolatility.toFixed(1)}%) - significant timing risk and pricing uncertainty`);
+        } else if (salesVolatility > 100) {
+            liquidityScore = Math.max(liquidityScore - 30, 10); // Major penalty for very high volatility
+            factors.push(`Very high volatility (${salesVolatility.toFixed(1)}%) - major price risk, timing critical`);
         } else if (salesVolatility > 80) {
-            liquidityScore = Math.max(liquidityScore - 15, 15); // Light penalty (was -25)
+            liquidityScore = Math.max(liquidityScore - 20, 10); // Moderate penalty
+            factors.push(`High volatility (${salesVolatility.toFixed(1)}%) - price timing matters significantly`);
+        } else if (salesVolatility > 50) {
+            liquidityScore = Math.max(liquidityScore - 12, 10); // Light penalty
             factors.push(`Moderate volatility (${salesVolatility.toFixed(1)}%) - some price risk`);
-        } else if (salesVolatility > 40) {
-            liquidityScore = Math.max(liquidityScore - 8, 15); // Very light penalty
+        } else if (salesVolatility > 25) {
+            liquidityScore = Math.max(liquidityScore - 5, 10); // Very light penalty
             factors.push(`Low volatility (${salesVolatility.toFixed(1)}%) - stable pricing`);
+        } else {
+            // Bonus for very stable items
+            liquidityScore = Math.min(liquidityScore + 5, 100);
+            factors.push(`Very low volatility (${salesVolatility.toFixed(1)}%) - excellent price stability`);
         }
     }
     
