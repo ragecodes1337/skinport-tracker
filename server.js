@@ -25,6 +25,259 @@ const requestQueue = []; // Queue to store timestamps of requests
 app.use(cors());
 app.use(express.json());
 
+/**
+ * Multi-timeframe analysis to find the best data source and detect trends
+ */
+function analyzeMultiTimeframe(salesData) {
+    const timeframes = [];
+    
+    // Check all available timeframes
+    if (salesData.last_24_hours && salesData.last_24_hours.volume > 0) {
+        timeframes.push({
+            period: '24h',
+            data: salesData.last_24_hours,
+            weight: 4, // Most recent = highest weight
+            recency: 1
+        });
+    }
+    
+    if (salesData.last_7_days && salesData.last_7_days.volume > 0) {
+        timeframes.push({
+            period: '7d',
+            data: salesData.last_7_days,
+            weight: 3,
+            recency: 2
+        });
+    }
+    
+    if (salesData.last_30_days && salesData.last_30_days.volume > 0) {
+        timeframes.push({
+            period: '30d',
+            data: salesData.last_30_days,
+            weight: 2,
+            recency: 3
+        });
+    }
+    
+    if (salesData.last_90_days && salesData.last_90_days.volume > 0) {
+        timeframes.push({
+            period: '90d',
+            data: salesData.last_90_days,
+            weight: 1, // Oldest = lowest weight
+            recency: 4
+        });
+    }
+    
+    if (timeframes.length === 0) {
+        return null;
+    }
+    
+    // Select best timeframe based on volume and recency
+    const bestTimeframe = timeframes.reduce((best, current) => {
+        const currentScore = (current.data.volume * current.weight) + (current.data.volume >= 5 ? 10 : 0);
+        const bestScore = (best.data.volume * best.weight) + (best.data.volume >= 5 ? 10 : 0);
+        return currentScore > bestScore ? current : best;
+    });
+    
+    // Detect price trend across timeframes
+    let trend = 'STABLE';
+    if (timeframes.length >= 2) {
+        const recent = timeframes.find(t => t.recency === 1) || timeframes.find(t => t.recency === 2);
+        const older = timeframes.find(t => t.recency === 3) || timeframes.find(t => t.recency === 4);
+        
+        if (recent && older) {
+            const recentPrice = recent.data.avg;
+            const olderPrice = older.data.avg;
+            const priceChange = ((recentPrice - olderPrice) / olderPrice) * 100;
+            
+            if (priceChange > 10) trend = 'RISING';
+            else if (priceChange < -10) trend = 'FALLING';
+        }
+    }
+    
+    return {
+        bestTimeframe,
+        allTimeframes: timeframes,
+        trend,
+        confidence: timeframes.length >= 2 ? 'HIGH' : timeframes.length === 1 ? 'MEDIUM' : 'LOW'
+    };
+}
+
+/**
+ * Smart achievable price calculation using actual sales data
+ */
+function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData, currentMinPrice) {
+    if (!multiTimeframeData || !multiTimeframeData.bestTimeframe) {
+        // Fallback to simple competitive pricing
+        return {
+            achievablePrice: currentMinPrice * 0.95,
+            confidence: 'LOW',
+            strategy: 'FALLBACK_COMPETITIVE',
+            reasoning: 'Limited sales data, using competitive pricing'
+        };
+    }
+    
+    const salesData = multiTimeframeData.bestTimeframe.data;
+    const trend = multiTimeframeData.trend;
+    
+    // Calculate various price points from sales data
+    const salesMedian = salesData.median || salesData.avg;
+    const salesAvg = salesData.avg;
+    const salesMin = salesData.min;
+    const salesMax = salesData.max;
+    const salesVolume = salesData.volume;
+    
+    // Check if current listings are realistic compared to sales
+    const listingVsSalesRatio = currentMinPrice / salesAvg;
+    
+    let basePrice;
+    let strategy;
+    let confidence;
+    let reasoning;
+    
+    if (listingVsSalesRatio > 1.3) {
+        // Current listings are 30%+ above average sales - use sales data
+        basePrice = salesMedian;
+        strategy = 'SALES_BASED';
+        reasoning = 'Current listings overpriced vs actual sales';
+    } else if (listingVsSalesRatio < 0.8) {
+        // Current listings are 20%+ below average sales - use competitive pricing
+        basePrice = currentMinPrice * 0.95;
+        strategy = 'COMPETITIVE';
+        reasoning = 'Current listings below typical sales price';
+    } else {
+        // Listings and sales are aligned - use hybrid approach
+        basePrice = (salesMedian * 0.6) + (currentMinPrice * 0.95 * 0.4);
+        strategy = 'HYBRID';
+        reasoning = 'Balanced between sales data and current competition';
+    }
+    
+    // Adjust for trend
+    if (trend === 'RISING') {
+        basePrice *= 1.05; // Price 5% higher in rising market
+        reasoning += ', adjusted up for rising trend';
+    } else if (trend === 'FALLING') {
+        basePrice *= 0.95; // Price 5% lower in falling market
+        reasoning += ', adjusted down for falling trend';
+    }
+    
+    // Adjust for volume (confidence factor)
+    if (salesVolume >= 20) {
+        confidence = 'HIGH';
+    } else if (salesVolume >= 10) {
+        confidence = 'MEDIUM';
+    } else if (salesVolume >= 3) {
+        confidence = 'LOW';
+        basePrice *= 0.97; // Price more conservatively with low volume
+    } else {
+        confidence = 'VERY_LOW';
+        basePrice *= 0.94; // Price very conservatively with minimal volume
+    }
+    
+    // Ensure we don't price below break-even
+    const minProfitablePrice = buyPrice * 1.10; // Minimum 10% markup before fees
+    if (basePrice < minProfitablePrice) {
+        basePrice = minProfitablePrice;
+        reasoning += ', adjusted to minimum profitable price';
+    }
+    
+    // Ensure we don't price way above what actually sells
+    if (basePrice > salesMax) {
+        basePrice = salesMax * 0.95;
+        reasoning += ', capped at max sales price';
+    }
+    
+    return {
+        achievablePrice: basePrice,
+        confidence,
+        strategy,
+        reasoning,
+        salesData: {
+            median: salesMedian,
+            avg: salesAvg,
+            min: salesMin,
+            max: salesMax,
+            volume: salesVolume
+        },
+        marketContext: {
+            listingVsSalesRatio: listingVsSalesRatio.toFixed(2),
+            trend
+        }
+    };
+}
+
+/**
+ * Simple 3-level confidence calculation
+ */
+function calculateOverallConfidence(marketData, multiTimeframeData, smartPricing, salesVolume, currentQuantity) {
+    let score = 0;
+    const factors = [];
+    
+    // Sales data quality (40% of confidence)
+    if (salesVolume >= 20) {
+        score += 40;
+        factors.push('Excellent sales volume (20+)');
+    } else if (salesVolume >= 10) {
+        score += 32;
+        factors.push('Good sales volume (10+)');
+    } else if (salesVolume >= 5) {
+        score += 24;
+        factors.push('Moderate sales volume (5+)');
+    } else if (salesVolume >= 2) {
+        score += 16;
+        factors.push('Low sales volume (2+)');
+    } else {
+        score += 8;
+        factors.push('Very low sales volume');
+    }
+    
+    // Market competition (30% of confidence)
+    if (currentQuantity >= 5 && currentQuantity <= 20) {
+        score += 30;
+        factors.push('Healthy competition (5-20 listings)');
+    } else if (currentQuantity >= 2 && currentQuantity <= 30) {
+        score += 24;
+        factors.push('Good competition (2-30 listings)');
+    } else if (currentQuantity >= 1) {
+        score += 18;
+        factors.push('Limited competition');
+    } else {
+        score += 10;
+        factors.push('No current competition');
+    }
+    
+    // Pricing strategy confidence (30% of confidence)
+    if (smartPricing.strategy === 'SALES_BASED' && smartPricing.confidence === 'HIGH') {
+        score += 30;
+        factors.push('High-confidence sales-based pricing');
+    } else if (smartPricing.strategy === 'HYBRID' && smartPricing.confidence !== 'VERY_LOW') {
+        score += 25;
+        factors.push('Balanced pricing strategy');
+    } else if (smartPricing.confidence !== 'VERY_LOW') {
+        score += 20;
+        factors.push('Reasonable pricing confidence');
+    } else {
+        score += 10;
+        factors.push('Limited pricing confidence');
+    }
+    
+    // Determine final confidence level
+    let confidenceLevel;
+    if (score >= 80) {
+        confidenceLevel = 'HIGH';
+    } else if (score >= 60) {
+        confidenceLevel = 'MEDIUM';
+    } else {
+        confidenceLevel = 'LOW';
+    }
+    
+    return {
+        level: confidenceLevel,
+        score: Math.round(score),
+        factors
+    };
+}
+
 // WEEKLY FLIP Trading Analysis - 3-7 Day Strategy for Best Accuracy & Sales
 function analyzeWeeklyFlipViability(itemName, priceData, salesData, trend, stability) {
     const volume = priceData.volume;
@@ -289,7 +542,7 @@ function createOptimalBatches(uniqueItems, maxUrlLength = 7000) {
         const itemLength = encodeURIComponent(item).length + 1; // +1 for comma
         
         // If adding this item would exceed URL limit or we hit reasonable batch size
-        if (currentUrlLength + itemLength > maxUrlLength || currentBatch.length >= 50) { // Reduced from 200 to 50 items per batch to prevent URL length issues
+        if (currentUrlLength + itemLength > maxUrlLength || currentBatch.length >= 100) { // Increased to 100 items per batch for better efficiency while avoiding URL length issues
             if (currentBatch.length > 0) {
                 batches.push([...currentBatch]);
                 currentBatch = [];
@@ -598,39 +851,75 @@ app.post('/analyze-prices', async (req, res) => {
                 continue;
             }
 
-            // Extract sales history data (what actually sold recently)
-            let priceData = null;
-            if (salesData.last_30_days && salesData.last_30_days.volume > 0) {
-                priceData = salesData.last_30_days;
-            } else if (salesData.last_90_days && salesData.last_90_days.volume > 0) {
-                priceData = salesData.last_90_days;
-            } else if (salesData.last_7_days && salesData.last_7_days.volume > 0) {
-                priceData = salesData.last_7_days;
-            } else {
+            // Extract sales history data using multi-timeframe analysis
+            const multiTimeframeAnalysis = analyzeMultiTimeframe(salesData);
+            if (!multiTimeframeAnalysis) {
                 console.log(`[Backend] No usable sales history for: ${itemName}`);
                 continue;
             }
-            // HYBRID APPROACH: Use current market prices for competition, sales history for validation
+            
+            const priceData = multiTimeframeAnalysis.bestTimeframe.data;
+            const timeframePeriod = multiTimeframeAnalysis.bestTimeframe.period;
+            
+            console.log(`[Multi-Timeframe] ${itemName}: Using ${timeframePeriod} data (${priceData.volume} sales, trend: ${multiTimeframeAnalysis.trend})`);
+            
+            // SMART ACHIEVABLE PRICE: Use actual sales data for realistic pricing
             const skinportBuyPrice = typeof itemPrice === 'number' ? itemPrice : parseFloat(itemPrice.toString().replace(',', '.'));
             
-            // Strategy: Undercut current market to sell quickly, but validate with sales history
-            const competitiveSellPrice = currentMinPrice * 0.95; // Undercut lowest current listing by 5%
-            const conservativeSellPrice = currentMinPrice * 0.90; // Undercut by 10% for guaranteed sale
-            const aggressiveSellPrice = currentMinPrice * 0.98;   // Undercut by 2% for maximum profit
+            // Calculate smart achievable price based on sales data
+            const smartPricing = calculateSmartAchievablePrice(skinportBuyPrice, marketData, multiTimeframeAnalysis, currentMinPrice);
+            const achievableGrossPrice = smartPricing.achievablePrice;
+            const achievableNetPrice = achievableGrossPrice * (1 - SKINPORT_FEE);
             
-            // After Skinport's 8% seller fee
-            const netCompetitivePrice = competitiveSellPrice * (1 - SKINPORT_FEE);
-            const netConservativePrice = conservativeSellPrice * (1 - SKINPORT_FEE);
-            const netAggressivePrice = aggressiveSellPrice * (1 - SKINPORT_FEE);
+            // Calculate profit
+            const profitAmount = achievableNetPrice - skinportBuyPrice;
+            const profitPercentage = (profitAmount / skinportBuyPrice) * 100;
             
-            // Calculate profits for different strategies
-            const competitiveProfit = netCompetitivePrice - skinportBuyPrice;
-            const conservativeProfit = netConservativePrice - skinportBuyPrice;
-            const aggressiveProfit = netAggressivePrice - skinportBuyPrice;
+            console.log(`[Smart Pricing] ${itemName}:`);
+            console.log(`  Strategy: ${smartPricing.strategy}`);
+            console.log(`  Reasoning: ${smartPricing.reasoning}`);
+            console.log(`  Buy Price: €${skinportBuyPrice.toFixed(2)}`);
+            console.log(`  Achievable Price: €${achievableGrossPrice.toFixed(2)} → €${achievableNetPrice.toFixed(2)} net`);
+            console.log(`  Profit: €${profitAmount.toFixed(2)} (${profitPercentage.toFixed(1)}%)`);
             
-            const competitiveProfitPercentage = (competitiveProfit / skinportBuyPrice) * 100;
-            const conservativeProfitPercentage = (conservativeProfit / skinportBuyPrice) * 100;
-            const aggressiveProfitPercentage = (aggressiveProfit / skinportBuyPrice) * 100;
+            // Skip items with no profit potential
+            if (profitAmount <= 0) {
+                console.log(`[Smart Pricing] ${itemName}: No profit potential - skipping`);
+                continue;
+            }
+            
+            // Apply user's minimum criteria (only basic filters now)
+            const minProfitAmount = parseFloat(settings.minProfitAmount || 0);
+            const minProfitPercentage = parseFloat(settings.minProfitPercentage || 0);
+            
+            if (profitAmount < minProfitAmount || profitPercentage < minProfitPercentage) {
+                console.log(`[Smart Pricing] ${itemName}: Below user minimum (€${profitAmount.toFixed(2)}, ${profitPercentage.toFixed(1)}%) - skipping`);
+                continue;
+            }
+            
+            // Calculate overall confidence using simplified system
+            const overallConfidence = calculateOverallConfidence(
+                marketData, 
+                multiTimeframeAnalysis, 
+                smartPricing, 
+                priceData.volume, 
+                currentQuantity
+            );
+            
+            // Calculate alternative pricing strategies for comparison
+            const competitivePrice = currentMinPrice * 0.95;
+            const conservativePrice = currentMinPrice * 0.90;
+            const aggressivePrice = currentMinPrice * 0.98;
+            
+            // Time estimate based on confidence and market conditions
+            let timeEstimate;
+            if (overallConfidence.level === 'HIGH') {
+                timeEstimate = '1-3 days';
+            } else if (overallConfidence.level === 'MEDIUM') {
+                timeEstimate = '2-5 days';
+            } else {
+                timeEstimate = '4-7 days';
+            }
             
             // Validate pricing against sales history
             const salesAvgPrice = priceData.avg;
@@ -638,143 +927,89 @@ app.post('/analyze-prices', async (req, res) => {
             const salesMaxPrice = priceData.max;
             const salesVolume = priceData.volume;
             
-            // Check if our selling prices are realistic based on what actually sold
-            const isPriceRealistic = competitiveSellPrice >= salesMinPrice && competitiveSellPrice <= salesMaxPrice;
-            const pricePosition = (competitiveSellPrice - salesMinPrice) / (salesMaxPrice - salesMinPrice);
+            // Market analysis
+            const pricePosition = (achievableGrossPrice - salesMinPrice) / (salesMaxPrice - salesMinPrice);
+            const marketSpread = currentMaxPrice - currentMinPrice;
+            const marketVolatility = (marketSpread / currentMeanPrice) * 100;
             
-            // Market analysis combining current listings + sales history
-            const currentMarketSpread = currentMaxPrice - currentMinPrice;
-            const salesHistorySpread = salesMaxPrice - salesMinPrice;
-            const marketVolatility = (currentMarketSpread / currentMeanPrice) * 100;
-            const salesVolatility = (salesHistorySpread / salesAvgPrice) * 100;
-            
-            console.log(`[Hybrid Analysis] ${itemName}:`);
-            console.log(`  Buy Price: €${skinportBuyPrice.toFixed(2)}`);
-            console.log(`  Current Market: €${currentMinPrice.toFixed(2)} - €${currentMaxPrice.toFixed(2)} (${currentQuantity} listings)`);
-            console.log(`  Sales History: €${salesMinPrice.toFixed(2)} - €${salesMaxPrice.toFixed(2)} (${salesVolume} sales, avg: €${salesAvgPrice.toFixed(2)})`);
-            console.log(`  Competitive Strategy: €${competitiveSellPrice.toFixed(2)} → €${netCompetitivePrice.toFixed(2)} net → €${competitiveProfit.toFixed(2)} profit (${competitiveProfitPercentage.toFixed(1)}%)`);
-            console.log(`  Price Validation: Realistic=${isPriceRealistic}, Position=${(pricePosition * 100).toFixed(0)}% of sales range`);
-            
-            // Use competitive strategy for main analysis
-            const achievablePrice = competitiveSellPrice;
-            const netAchievablePrice = netCompetitivePrice;
-            const profitAmount = competitiveProfit;
-            const profitPercentage = competitiveProfitPercentage;
-            
-            // Skip items with no profit potential or unrealistic pricing
-            if (profitAmount <= 0) {
-                console.log(`[Hybrid] ${itemName}: No profit potential - skipping`);
-                continue;
-            }
-            
-            if (!isPriceRealistic) {
-                console.log(`[Hybrid] ${itemName}: Unrealistic pricing based on sales history - skipping`);
-                continue;
-            }
-
-            // Enhanced validation using BOTH current market + sales history
-            const minProfitAmount = parseFloat(settings.minProfitAmount || 0);
-            const minProfitPercentage = parseFloat(settings.minProfitPercentage || 0);
-            
-            // Basic profit criteria
-            const meetsBasicCriteria = profitAmount >= minProfitAmount && profitPercentage >= minProfitPercentage;
-            
-            // Market competition analysis (current listings)
-            const hasGoodCompetition = currentQuantity >= 2 && currentQuantity <= 25; // Sweet spot for competition
-            const competitionRating = currentQuantity >= 15 ? 'HIGH' : currentQuantity >= 8 ? 'MEDIUM' : currentQuantity >= 2 ? 'LOW' : 'VERY_LOW';
-            
-            // Sales volume analysis (historical data)  
-            const hasGoodVolume = salesVolume >= 10; // At least 10 sales in the period
-            const volumeRating = salesVolume >= 50 ? 'HIGH' : salesVolume >= 20 ? 'MEDIUM' : salesVolume >= 10 ? 'LOW' : 'VERY_LOW';
-            
-            // Price stability (how volatile the market is)
-            const priceStability = Math.max(0, 100 - Math.max(marketVolatility, salesVolatility));
-            const isStable = priceStability >= 30;
-            
-            // Weekly flip viability analysis
-            const weeklyFlipViability = analyzeWeeklyFlipViability(itemName, priceData, salesData, 'STABLE', priceStability);
-            const meetsWeeklyFlipCriteria = weeklyFlipViability.score >= 25;
-            
-            console.log(`[Validation] ${itemName}:`);
-            console.log(`  Profit: €${profitAmount.toFixed(2)} (${profitPercentage.toFixed(1)}%)`);
-            console.log(`  Competition: ${currentQuantity} listings (${competitionRating}), Volume: ${salesVolume} sales (${volumeRating})`);
-            console.log(`  Stability: ${priceStability.toFixed(1)}%, Weekly Viability: ${weeklyFlipViability.score}/100`);
-            console.log(`  Criteria: Basic=${meetsBasicCriteria}, Competition=${hasGoodCompetition}, Volume=${hasGoodVolume}, Stable=${isStable}, WeeklyFlip=${meetsWeeklyFlipCriteria}`);
-            
-            if (meetsBasicCriteria && hasGoodCompetition && hasGoodVolume && isStable && meetsWeeklyFlipCriteria) {
-                analyzedItems.push({
-                    ...item,
-                    name: itemName,
-                    skinportPrice: itemPrice,
-                    
-                    // Current market data (what's listed now)
-                    currentMinPrice: currentMinPrice.toFixed(2),
-                    currentMaxPrice: currentMaxPrice.toFixed(2),
-                    currentMeanPrice: currentMeanPrice.toFixed(2),
-                    currentMedianPrice: currentMedianPrice.toFixed(2),
-                    currentQuantity: currentQuantity,
-                    
-                    // Sales history data (what actually sold)
-                    salesAvgPrice: salesAvgPrice.toFixed(2),
-                    salesMinPrice: salesMinPrice.toFixed(2),
-                    salesMaxPrice: salesMaxPrice.toFixed(2),
-                    salesVolume: salesVolume,
-                    
-                    // Profit calculations
-                    achievablePrice: netAchievablePrice.toFixed(2), // What you'll actually get after fees
-                    grossAchievablePrice: achievablePrice.toFixed(2), // What to list at before fees
-                    profitAmount: profitAmount.toFixed(2),
-                    profitPercentage: profitPercentage.toFixed(1),
-                    
-                    // Market analysis
-                    priceStability: priceStability.toFixed(1),
-                    competitionRating: competitionRating,
-                    volumeRating: volumeRating,
-                    isPriceRealistic: isPriceRealistic,
-                    pricePosition: (pricePosition * 100).toFixed(0),
-                    
-                    // Strategy details
-                    strategies: {
-                        aggressive: {
-                            price: aggressiveSellPrice.toFixed(2),
-                            netPrice: netAggressivePrice.toFixed(2),
-                            profit: aggressiveProfit.toFixed(2),
-                            profitPercent: aggressiveProfitPercentage.toFixed(1)
-                        },
-                        competitive: {
-                            price: competitiveSellPrice.toFixed(2),
-                            netPrice: netCompetitivePrice.toFixed(2),
-                            profit: competitiveProfit.toFixed(2),
-                            profitPercent: competitiveProfitPercentage.toFixed(1)
-                        },
-                        conservative: {
-                            price: conservativeSellPrice.toFixed(2),
-                            netPrice: netConservativePrice.toFixed(2),
-                            profit: conservativeProfit.toFixed(2),
-                            profitPercent: conservativeProfitPercentage.toFixed(1)
-                        }
-                    },
-                    
-                    // Weekly flip analysis
-                    weeklyFlipViability: weeklyFlipViability,
-                    
-                    recommendation: profitPercentage > 20 ? 'STRONG_BUY' : 
-                                   profitPercentage > 10 ? 'BUY' : 
-                                   profitPercentage > 5 ? 'CONSIDER' : 'HOLD'
-                });
+            // Create analyzed item with smart pricing
+            analyzedItems.push({
+                ...item,
+                name: itemName,
+                skinportPrice: itemPrice,
                 
-                console.log(`[Enhanced Profit] ${itemName}:`);
-                console.log(`  Profit: €${profitAmount.toFixed(2)} (${profitPercentage.toFixed(1)}%)`);
-                console.log(`  Risk: ${competitionRating}, Confidence: ${priceStability.toFixed(1)}%, Listings: ${currentQuantity}`);
-                console.log(`  Liquidity: ${volumeRating}, Trend: STABLE`);
-            } else if (profitAmount >= -2.0) {
-                // Log items that are close to profitable for debugging
-                console.log(`[Almost Profitable] ${itemName}:`);
-                console.log(`  Buy Price: €${skinportBuyPrice.toFixed(2)}, Current Min: €${currentMinPrice.toFixed(2)}, After Fees: €${netAchievablePrice.toFixed(2)}`);
-                console.log(`  Profit: €${profitAmount.toFixed(2)} (${profitPercentage.toFixed(1)}%) - Missing profit by €${Math.abs(profitAmount).toFixed(2)}`);
-                console.log(`  Failed criteria: Basic=${meetsBasicCriteria}, Competition=${hasGoodCompetition}, Volume=${hasGoodVolume}, Stable=${isStable}, WeeklyFlip=${meetsWeeklyFlipCriteria}`);
-                console.log(`  This item needs €${Math.abs(profitAmount + 1.0).toFixed(2)} less buy price to be profitable`);
-            }
+                // Current market data (what's listed now)
+                currentMinPrice: currentMinPrice.toFixed(2),
+                currentMaxPrice: currentMaxPrice.toFixed(2),
+                currentMeanPrice: currentMeanPrice.toFixed(2),
+                currentMedianPrice: currentMedianPrice.toFixed(2),
+                currentQuantity: currentQuantity,
+                
+                // Sales history data (what actually sold)
+                salesAvgPrice: salesAvgPrice.toFixed(2),
+                salesMinPrice: salesMinPrice.toFixed(2),
+                salesMaxPrice: salesMaxPrice.toFixed(2),
+                salesVolume: salesVolume,
+                timeframePeriod: timeframePeriod,
+                
+                // Smart pricing results
+                achievablePrice: achievableNetPrice.toFixed(2), // What you'll actually get after fees
+                grossAchievablePrice: achievableGrossPrice.toFixed(2), // What to list at before fees
+                profitAmount: profitAmount.toFixed(2),
+                profitPercentage: profitPercentage.toFixed(1),
+                
+                // Confidence and market analysis
+                confidence: overallConfidence.level,
+                confidenceScore: overallConfidence.score,
+                confidenceFactors: overallConfidence.factors,
+                timeEstimate: timeEstimate,
+                pricingStrategy: smartPricing.strategy,
+                pricingReasoning: smartPricing.reasoning,
+                trend: multiTimeframeAnalysis.trend,
+                pricePosition: Math.round(pricePosition * 100),
+                marketVolatility: marketVolatility.toFixed(1),
+                
+                // Alternative pricing strategies for comparison
+                strategies: {
+                    smart: {
+                        price: achievableGrossPrice.toFixed(2),
+                        netPrice: achievableNetPrice.toFixed(2),
+                        profit: profitAmount.toFixed(2),
+                        profitPercent: profitPercentage.toFixed(1)
+                    },
+                    aggressive: {
+                        price: aggressivePrice.toFixed(2),
+                        netPrice: (aggressivePrice * (1 - SKINPORT_FEE)).toFixed(2),
+                        profit: ((aggressivePrice * (1 - SKINPORT_FEE)) - skinportBuyPrice).toFixed(2),
+                        profitPercent: (((aggressivePrice * (1 - SKINPORT_FEE)) - skinportBuyPrice) / skinportBuyPrice * 100).toFixed(1)
+                    },
+                    competitive: {
+                        price: competitivePrice.toFixed(2),
+                        netPrice: (competitivePrice * (1 - SKINPORT_FEE)).toFixed(2),
+                        profit: ((competitivePrice * (1 - SKINPORT_FEE)) - skinportBuyPrice).toFixed(2),
+                        profitPercent: (((competitivePrice * (1 - SKINPORT_FEE)) - skinportBuyPrice) / skinportBuyPrice * 100).toFixed(1)
+                    },
+                    conservative: {
+                        price: conservativePrice.toFixed(2),
+                        netPrice: (conservativePrice * (1 - SKINPORT_FEE)).toFixed(2),
+                        profit: ((conservativePrice * (1 - SKINPORT_FEE)) - skinportBuyPrice).toFixed(2),
+                        profitPercent: (((conservativePrice * (1 - SKINPORT_FEE)) - skinportBuyPrice) / skinportBuyPrice * 100).toFixed(1)
+                    }
+                },
+                
+                // Recommendation based on confidence and profit
+                recommendation: overallConfidence.level === 'HIGH' && profitPercentage > 15 ? 'STRONG_BUY' :
+                               overallConfidence.level === 'HIGH' && profitPercentage > 8 ? 'BUY' :
+                               overallConfidence.level === 'MEDIUM' && profitPercentage > 12 ? 'BUY' :
+                               overallConfidence.level === 'MEDIUM' && profitPercentage > 6 ? 'CONSIDER' :
+                               profitPercentage > 10 ? 'CONSIDER' : 'HOLD'
+            });
+            
+            console.log(`[Smart Analysis] ${itemName}:`);
+            console.log(`  Confidence: ${overallConfidence.level} (${overallConfidence.score}/100)`);
+            console.log(`  Profit: €${profitAmount.toFixed(2)} (${profitPercentage.toFixed(1)}%)`);
+            console.log(`  Time Estimate: ${timeEstimate}`);
+            console.log(`  Strategy: ${smartPricing.strategy}`);
         }
 
         console.log(`[Backend] Analysis complete. Found ${analyzedItems.length} profitable items.`);
@@ -787,8 +1022,9 @@ app.post('/analyze-prices', async (req, res) => {
                 uniqueItemsChecked: uniqueNames.length,
                 marketDataFound: Object.keys(allMarketData).length,
                 salesDataFound: Object.keys(allSalesData).length,
-                strategy: 'Hybrid Skinport market + sales history analysis',
-                timeframe: '3-7 day flip trading'
+                strategy: 'Smart multi-timeframe pricing with sales data analysis',
+                timeframe: 'Dynamic (24h, 7d, 30d, 90d)',
+                algorithm: 'Enhanced smart pricing v2.0'
             }
         });
     } catch (error) {
