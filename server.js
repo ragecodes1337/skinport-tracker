@@ -3,42 +3,8 @@ import express from 'express';
 import cors from 'cors';
 import fetch from 'node-fetch';
 import NodeCache from 'node-cache';
-        const batchData = {};
-        if (Array.isArray(data)) {
-            console.log(`[API Response] Processing ${data.length} items from API`);
-            console.log(`[API Response] First 3 API item names:`, data.slice(0, 3).map(item => item.market_hash_name));
-            
-            data.forEach(item => {
-                if (item.market_hash_name) {
-                    batchData[item.market_hash_name] = item;
-                }
-            });
-            
-            // Debug StatTrak items specifically
-            const requestedStatTrak = validNames.filter(name => name.includes('StatTrak'));
-            const receivedStatTrak = Object.keys(batchData).filter(name => name.includes('StatTrak'));
-            
-            if (requestedStatTrak.length > 0) {
-                console.log(`[API Debug] StatTrak requested (${requestedStatTrak.length}):`, requestedStatTrak.slice(0, 3));
-                console.log(`[API Debug] StatTrak received (${receivedStatTrak.length}):`, receivedStatTrak.slice(0, 3));
-                
-                // Check for exact mismatches
-                requestedStatTrak.forEach(reqName => {
-                    if (!batchData[reqName]) {
-                        console.log(`[API Debug] MISSING StatTrak: Requested "${reqName}" but not found in API response`);
-                        
-                        // Try to find similar names
-                        const similarNames = Object.keys(batchData).filter(apiName => 
-                            apiName.includes('StatTrak') && 
-                            apiName.toLowerCase().includes(reqName.toLowerCase().split('|')[1]?.trim().split('(')[0]?.trim() || '')
-                        );
-                        if (similarNames.length > 0) {
-                            console.log(`[API Debug] Possible matches for "${reqName}":`, similarNames);
-                        }
-                    }
-                });
-            }
-        } app = express();
+
+const app = express();
 const port = process.env.PORT || 3000;
 
 // Cache for API responses (5 minutes = 300 seconds, matching the Skinport cache)
@@ -278,17 +244,6 @@ async function fetchSalesHistoryBatch(marketHashNames, currency) {
             
             if (missingItems.length > 0) {
                 console.log(`[API Response] Missing items (${missingItems.length}):`, missingItems.slice(0, 5));
-                console.log(`[API Response] Example API names:`, foundItems.slice(0, 5));
-                
-                // Check for potential name mismatches
-                missingItems.slice(0, 3).forEach(missing => {
-                    const possibleMatch = foundItems.find(found => 
-                        found.toLowerCase().includes(missing.toLowerCase().replace('stattrak ', '').split(' ')[0])
-                    );
-                    if (possibleMatch) {
-                        console.log(`[API Response] Possible mismatch: "${missing}" vs "${possibleMatch}"`);
-                    }
-                });
             }
         }
         
@@ -304,637 +259,6 @@ async function fetchSalesHistoryBatch(marketHashNames, currency) {
     }
 }
 
-/**
- * ADVANCED ANALYSIS FUNCTIONS
- */
-
-/**
- * Analyzes price trends using median prices (more accurate than averages)
- */
-function analyzePriceTrends(apiData) {
-    const periods = {
-        day1: apiData.last_24_hours,
-        day7: apiData.last_7_days,
-        day30: apiData.last_30_days,
-        day90: apiData.last_90_days
-    };
-    
-    // Use MEDIAN prices for more accurate trend analysis (filters outliers)
-    const prices = [];
-    const timeframes = [];
-    
-    if (periods.day1?.median) {
-        prices.push(periods.day1.median);
-        timeframes.push('24h');
-    }
-    if (periods.day7?.median) {
-        prices.push(periods.day7.median);
-        timeframes.push('7d');
-    }
-    if (periods.day30?.median) {
-        prices.push(periods.day30.median);
-        timeframes.push('30d');
-    }
-    if (periods.day90?.median) {
-        prices.push(periods.day90.median);
-        timeframes.push('90d');
-    }
-    
-    if (prices.length === 0) return null;
-    
-    // Calculate trend
-    let trend = 'stable';
-    let trendStrength = 0;
-    
-    if (prices.length >= 2) {
-        const recentPrice = prices[0]; // Most recent (24h or 7d)
-        const longerTermPrice = prices[Math.min(2, prices.length - 1)]; // 30d if available
-        const change = ((recentPrice - longerTermPrice) / longerTermPrice) * 100;
-        
-        trendStrength = Math.abs(change);
-        
-        if (change > 5) trend = 'rising';
-        else if (change < -5) trend = 'falling';
-        else trend = 'stable';
-    }
-    
-    // Calculate confidence based on data availability and volume
-    let confidence = 0;
-    confidence += prices.length * 20; // 20 per timeframe
-    
-    if (periods.day7?.volume > 20) confidence += 20;
-    else if (periods.day7?.volume > 10) confidence += 15;
-    else if (periods.day7?.volume > 5) confidence += 10;
-    
-    if (periods.day30?.volume > 50) confidence += 15;
-    if (periods.day1?.volume > 5) confidence += 15;
-    
-    confidence = Math.min(confidence, 100);
-    
-    return {
-        prices: prices.map((p, i) => ({ period: timeframes[i], price: p })),
-        trend,
-        trendStrength: parseFloat(trendStrength.toFixed(2)),
-        mostRecentPrice: prices[0],
-        confidence
-    };
-}
-
-/**
- * Assesses item liquidity based on sales frequency - more realistic thresholds
- */
-function assessLiquidity(apiData) {
-    const sales7d = apiData.last_7_days?.volume || 0;
-    const sales30d = apiData.last_30_days?.volume || 0;
-    const sales90d = apiData.last_90_days?.volume || 0;
-    
-    let liquidityRating;
-    let sellTimeEstimate;
-    
-    // More realistic liquidity thresholds
-    if (sales7d >= 15) {
-        liquidityRating = 'GOOD';
-        sellTimeEstimate = '1-3 days';
-    } else if (sales7d >= 8) {
-        liquidityRating = 'MEDIUM';
-        sellTimeEstimate = '3-7 days';
-    } else {
-        liquidityRating = 'BAD';
-        sellTimeEstimate = '1+ weeks';
-    }
-    
-    // Calculate liquidity score with more reasonable thresholds
-    let score = 0;
-    
-    // Base score from weekly sales
-    if (sales7d >= 30) score += 80;
-    else if (sales7d >= 15) score += 60;
-    else if (sales7d >= 8) score += 40;
-    else if (sales7d >= 5) score += 25;
-    else score += 10;
-    
-    // Consistency bonus
-    if (sales30d > 0) {
-        const consistency = (sales7d * 4.3) / sales30d;
-        if (consistency >= 0.8 && consistency <= 1.2) score += 15;
-        else if (consistency > 1.2) score += 10;
-        else score += 5;
-    }
-    
-    // Volume bonus for long-term activity
-    if (sales90d >= 200) score += 15;
-    else if (sales90d >= 100) score += 10;
-    else if (sales90d >= 50) score += 5;
-    
-    score = Math.min(Math.round(score), 100);
-    
-    return {
-        rating: liquidityRating,
-        score,
-        sales7d,
-        sales30d,
-        sales90d,
-        dailyAvg7d: parseFloat((sales7d / 7).toFixed(2)),
-        sellTimeEstimate
-    };
-}
-
-/**
- * Enhanced market timing analysis
- */
-function analyzeMarketTiming(apiData) {
-    const now = new Date();
-    const hour = now.getHours();
-    const dayOfWeek = now.getDay(); // 0 = Sunday, 6 = Saturday
-    
-    let marketActivity = 'NORMAL';
-    let timingMultiplier = 1.0;
-    
-    // Peak trading hours (when most people are active)
-    const isPeakHour = (hour >= 14 && hour <= 22) || (hour >= 9 && hour <= 12);
-    const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
-    
-    if (isPeakHour && !isWeekend) {
-        marketActivity = 'PEAK';
-        timingMultiplier = 1.05; // 5% higher prices during peak hours
-    } else if (isWeekend) {
-        marketActivity = 'WEEKEND';
-        timingMultiplier = 0.98; // 2% lower prices on weekends
-    } else if (hour >= 0 && hour <= 6) {
-        marketActivity = 'LOW';
-        timingMultiplier = 0.95; // 5% lower prices during low activity
-    }
-    
-    return {
-        marketActivity,
-        timingMultiplier,
-        isPeakHour,
-        isWeekend,
-        currentHour: hour,
-        dayOfWeek
-    };
-}
-
-/**
- * Supply and demand analysis
- */
-function analyzeSupplyDemand(apiData) {
-    const sales7d = apiData.last_7_days?.volume || 0;
-    const sales30d = apiData.last_30_days?.volume || 0;
-    const sales90d = apiData.last_90_days?.volume || 0;
-    
-    // Calculate demand trends
-    const weeklyAvg = sales7d / 7;
-    const monthlyAvg = sales30d / 30;
-    const quarterlyAvg = sales90d / 90;
-    
-    let demandTrend = 'STABLE';
-    let demandMultiplier = 1.0;
-    
-    // Compare recent vs long-term demand
-    if (weeklyAvg > monthlyAvg * 1.2) {
-        demandTrend = 'INCREASING';
-        demandMultiplier = 1.03; // 3% higher prices due to increasing demand
-    } else if (weeklyAvg < monthlyAvg * 0.8) {
-        demandTrend = 'DECREASING';
-        demandMultiplier = 0.97; // 3% lower prices due to decreasing demand
-    }
-    
-    // Supply analysis based on price volatility
-    const volatility7d = apiData.last_7_days ? 
-        ((apiData.last_7_days.max - apiData.last_7_days.min) / apiData.last_7_days.median) * 100 : 0;
-    
-    let supplyStatus = 'NORMAL';
-    if (volatility7d > 50) {
-        supplyStatus = 'VOLATILE'; // High volatility suggests supply issues
-    } else if (volatility7d < 10) {
-        supplyStatus = 'STABLE'; // Low volatility suggests stable supply
-    }
-    
-    return {
-        demandTrend,
-        demandMultiplier,
-        supplyStatus,
-        weeklyAvg: parseFloat(weeklyAvg.toFixed(2)),
-        monthlyAvg: parseFloat(monthlyAvg.toFixed(2)),
-        quarterlyAvg: parseFloat(quarterlyAvg.toFixed(2)),
-        volatility7d: parseFloat(volatility7d.toFixed(2))
-    };
-}
-
-/**
- * Enhanced comprehensive item analysis with realistic profit calculations
- */
-function analyzeItemOpportunity(currentPrice, apiData, minProfit, minProfitMargin, settings = {}) {
-    // Use enhanced profit calculation
-    const enhancedProfit = calculateEnhancedProfit(currentPrice, apiData, settings);
-    if (!enhancedProfit) {
-        return null; // Skip items with insufficient data
-    }
-    
-    const { achievablePrice, netSellingPrice, profit, profitMargin, profitConfidence } = enhancedProfit;
-    
-    const trends = analyzePriceTrends(apiData);
-    const liquidity = assessLiquidity(apiData);
-    const marketTiming = analyzeMarketTiming(apiData);
-    const supplyDemand = analyzeSupplyDemand(apiData);
-    
-    // Price volatility for risk assessment
-    const volatility7d = apiData.last_7_days ? 
-        ((apiData.last_7_days.max - apiData.last_7_days.min) / apiData.last_7_days.median) * 100 : 0;
-    
-    // Enhanced risk assessment with more factors
-    let riskScore = 40; // Base risk
-    
-    // Volatility risk (more detailed) - using volatility7d from above
-    
-    if (volatility7d > 100) riskScore += 25;
-    else if (volatility7d > 50) riskScore += 15;
-    else if (volatility7d > 20) riskScore += 5;
-    
-    // Simplified liquidity risk - only GOOD or BAD
-    if (liquidity.rating === 'GOOD') riskScore -= 20; // Much lower risk for good liquidity
-    else riskScore += 30; // Much higher risk for bad liquidity
-    
-    // Trend risk (enhanced)
-    if (trends.trend === 'falling' && trends.confidence > 60) riskScore += 20;
-    else if (trends.trend === 'falling' && trends.confidence > 40) riskScore += 10;
-    else if (trends.trend === 'rising' && trends.confidence > 60) riskScore -= 10;
-    else if (trends.trend === 'rising' && trends.confidence > 40) riskScore -= 5;
-    
-    // Market timing risk (new)
-    if (marketTiming.marketActivity === 'LOW') riskScore += 10;
-    else if (marketTiming.marketActivity === 'PEAK') riskScore -= 5;
-    
-    // Supply/demand risk (new)
-    if (supplyDemand.supplyStatus === 'VOLATILE') riskScore += 15;
-    else if (supplyDemand.demandTrend === 'DECREASING') riskScore += 10;
-    else if (supplyDemand.demandTrend === 'INCREASING') riskScore -= 5;
-    
-    // Profit margin risk (more nuanced)
-    if (profitMargin > 100) riskScore += 30; // Suspiciously high
-    else if (profitMargin > 50) riskScore += 15;
-    else if (profitMargin > 30) riskScore += 5;
-    else if (profitMargin < 3) riskScore += 10;
-    
-    // Price threshold risk (new)
-    if (currentPrice < (settings.minPriceThreshold || 1.0)) {
-        riskScore += 15; // Cheap items often have poor liquidity
-    }
-    
-    // Sales volume risk (new)
-    if (liquidity.sales7d < (settings.minSalesVolume || 5)) {
-        riskScore += 20; // Low sales volume = higher risk
-    }
-    
-    // Consistency risk (new)
-    if (liquidity.sales30d > 0) {
-        const consistency = (liquidity.sales7d * 4.3) / liquidity.sales30d;
-        if (consistency < 0.5 || consistency > 2.0) riskScore += 10; // Inconsistent sales
-    }
-    
-    riskScore = Math.max(5, Math.min(95, riskScore));
-    
-    // Determine risk level
-    let riskLevel;
-    if (riskScore <= 20) riskLevel = 'LOW';
-    else if (riskScore <= 40) riskLevel = 'MEDIUM';
-    else if (riskScore <= 60) riskLevel = 'HIGH';
-    else riskLevel = 'VERY_HIGH';
-    
-    // Enhanced recommendation system
-    let recommendation;
-    let recommendationReason = [];
-    
-    if (profit <= 0) {
-        recommendation = 'AVOID';
-        recommendationReason.push('No profit after fees');
-    } else if (riskScore > 80) {
-        recommendation = 'AVOID';
-        recommendationReason.push('Too risky');
-    } else if (liquidity.rating === 'BAD') {
-        recommendation = 'AVOID';
-        recommendationReason.push('Poor liquidity');
-    } else if (profitMargin >= 20 && liquidity.score >= 60 && riskScore <= 30) {
-        recommendation = 'STRONG BUY';
-        recommendationReason.push('High profit, good liquidity, low risk');
-    } else if (profitMargin >= 15 && liquidity.score >= 45 && riskScore <= 40) {
-        recommendation = 'BUY';
-        recommendationReason.push('Good profit with acceptable risk');
-    } else if (profitMargin >= 10 && liquidity.score >= 30 && riskScore <= 50) {
-        recommendation = 'CONSIDER';
-        recommendationReason.push('Moderate opportunity');
-    } else if (profitMargin >= 5 && liquidity.score >= 20 && riskScore <= 60) {
-        recommendation = 'WEAK BUY';
-        recommendationReason.push('Low profit but manageable risk');
-    } else {
-        recommendation = 'AVOID';
-        recommendationReason.push('Unfavorable risk/reward ratio');
-    }
-    
-    // Apply user filters with more lenient approach
-    console.log(`[Filter] Item analysis: Profit=€${profit.toFixed(2)}, Margin=${profitMargin.toFixed(1)}%, Liquidity=${liquidity.rating}, Sales7d=${liquidity.sales7d}`);
-    console.log(`[Filter] User settings: minProfit=€${minProfit}, minProfitMargin=${minProfitMargin}%, minLiquidity=${settings.minLiquidity}, minSalesVolume=${settings.minSalesVolume}`);
-    
-    // More lenient profit filtering - only apply if user settings are stricter than our calculated minimums
-    const calculatedMinProfit = currentPrice < 5 ? 0.50 : currentPrice < 20 ? 1.50 : currentPrice < 100 ? 3.00 : 5.00;
-    const calculatedMinMargin = currentPrice < 5 ? 5 : currentPrice < 20 ? 8 : currentPrice < 100 ? 10 : 12;
-    
-    const actualMinProfit = Math.max(minProfit || 0, calculatedMinProfit);
-    const actualMinMargin = Math.max(minProfitMargin || 0, calculatedMinMargin);
-    
-    if (profit < actualMinProfit || profitMargin < actualMinMargin) {
-        console.log(`[Filter] REJECTED: Profit/margin below threshold (Profit: €${profit.toFixed(2)} < €${actualMinProfit}, Margin: ${profitMargin.toFixed(1)}% < ${actualMinMargin}%)`);
-        return null; // Doesn't meet criteria
-    }
-    
-    // Much more lenient liquidity filtering - only reject if liquidity is really bad
-    if (settings.minLiquidity && settings.minLiquidity === 'GOOD' && liquidity.rating !== 'GOOD') {
-        console.log(`[Filter] REJECTED: Liquidity requirement not met (${liquidity.rating} < GOOD)`);
-        return null; // Doesn't meet liquidity requirements
-    }
-    
-    // More lenient sales volume filtering
-    const userMinSales = settings.minSalesVolume || 5;
-    const calculatedMinSales = currentPrice < 5 ? 5 : currentPrice < 20 ? 8 : currentPrice < 100 ? 10 : 12;
-    const actualMinSales = Math.max(userMinSales, calculatedMinSales);
-    
-    if (liquidity.sales7d < actualMinSales) {
-        console.log(`[Filter] REJECTED: Sales volume too low (${liquidity.sales7d} < ${actualMinSales})`);
-        return null; // Doesn't meet sales volume requirements
-    }
-    
-    console.log(`[Filter] ACCEPTED: Item meets all criteria`);
-    
-    return {
-        currentPrice,
-        predictedSellingPrice: parseFloat(achievablePrice.toFixed(2)),
-        netSellingPrice: parseFloat(netSellingPrice.toFixed(2)),
-        profit: parseFloat(profit.toFixed(2)),
-        profitMargin: parseFloat(profitMargin.toFixed(2)),
-        profitConfidence,
-        trends,
-        liquidity,
-        marketTiming,
-        supplyDemand,
-        riskScore,
-        riskLevel,
-        recommendation,
-        recommendationReason: recommendationReason.join(', '),
-        volatility7d: parseFloat(volatility7d.toFixed(2)),
-        feeAmount: parseFloat((achievablePrice * SKINPORT_FEE).toFixed(2)),
-        netProfitAfterFees: parseFloat(profit.toFixed(2)),
-        enhancedFactors: enhancedProfit.factors
-    };
-}
-
-/**
- * Computes an achievable selling price based on market data
- */
-function computeAchievablePrice(apiData) {
-    const m24 = apiData.last_24_hours?.median;
-    const v24 = apiData.last_24_hours?.volume || 0;
-    const m7 = apiData.last_7_days?.median;
-    const v7 = apiData.last_7_days?.volume || 0;
-    const m30 = apiData.last_30_days?.median;
-
-    // 1) Base median selection
-    let baseMedian = null;
-    if (m24 && v24 >= 5) baseMedian = m24;
-    else if (m7 && v7 >= 15) baseMedian = m7;
-    else baseMedian = m24 || m7 || m30;
-
-    if (!baseMedian) return null;
-
-    // 2) Trend factor based on 24h vs 7d
-    let trendFactor = 1.00;
-    if (m24 && m7) {
-        const change = (m24 - m7) / m7;
-        if (change <= -0.05) trendFactor = 0.98;
-        else if (change >= 0.05) trendFactor = 1.02;
-    }
-
-    // 3) Liquidity factor based on 7d sales
-    let liquidityFactor = 1.00;
-    if (v7 >= 40) liquidityFactor = 1.00;
-    else if (v7 >= 15) liquidityFactor = 0.99;
-    else liquidityFactor = 0.97;
-
-    // 4) Volatility factor
-    const vol7 = apiData.last_7_days ? 
-        ((apiData.last_7_days.max - apiData.last_7_days.min) / apiData.last_7_days.median) : 0;
-    let volatilityFactor = 1.00;
-    if (vol7 > 0.50) volatilityFactor = 0.97;
-    else if (vol7 > 0.30) volatilityFactor = 0.99;
-
-    // 5) Undercut pressure from recent vs longer-term prices
-    let undercutFactor = 1.00;
-    if (m24 && m30 && (m24 < m30 * 0.95)) undercutFactor = 0.98;
-
-    // 6) Calculate achievable price with adaptive sell underprice
-    let sellUnderprice = 0.995; // Default to 0.5% below market
-    if (m24 && m7) {
-        const dip = (m24 - m7) / m7;
-        if (dip <= -0.06) sellUnderprice = 0.985; // Deeper discount for strong downtrend
-        else if (dip <= -0.02) sellUnderprice = 0.99; // Moderate discount for slight downtrend
-    }
-    
-    const rawPredicted = baseMedian * trendFactor * liquidityFactor * volatilityFactor * undercutFactor;
-    const achievablePrice = rawPredicted * sellUnderprice;
-
-    return {
-        achievablePrice,
-        baseMedian,
-        factors: {
-            trendFactor,
-            liquidityFactor,
-            volatilityFactor,
-            undercutFactor,
-            sellUnderprice
-        },
-        metrics: {
-            vol7,
-            v7,
-            v24,
-            m24,
-            m7,
-            m30
-        }
-    };
-}
-
-// Simplified and more realistic profit calculation strategy
-function calculateEnhancedProfit(currentPrice, apiData, settings = {}) {
-    const priceData = computeAchievablePrice(apiData);
-    if (!priceData) {
-        console.log(`[Filter] REJECTED: No price data available for €${currentPrice} item`);
-        return null;
-    }
-
-    const { achievablePrice, metrics, factors } = priceData;
-    const { vol7, v7, v24 } = metrics;
-    
-    // Much more lenient sales volume requirements based on actual market conditions
-    const minSalesForPrice = currentPrice < 5 ? 3 :     // Very cheap items need 3 sales
-                            currentPrice < 20 ? 5 :     // Low-mid items need 5 sales  
-                            currentPrice < 50 ? 6 :     // Mid items need 6 sales
-                            currentPrice < 100 ? 7 :    // Higher mid items need 7 sales
-                            currentPrice < 500 ? 3 :    // Expensive items need only 3 sales (they trade less)
-                            1;                           // Very expensive items need only 1 sale
-    
-    if (v7 < minSalesForPrice) {
-        console.log(`[Filter] REJECTED: Insufficient sales volume (${v7} < ${minSalesForPrice}) for €${currentPrice} item`);
-        return null;
-    }
-
-    // Apply realistic costs and fees
-    const buySlippage = 1.002; // 0.2% execution friction (reduced)
-    const effectiveCost = currentPrice * buySlippage;
-    const netSellingPrice = achievablePrice * 0.92; // After 8% fee
-    const profit = netSellingPrice - effectiveCost;
-    const profitMargin = (profit / effectiveCost) * 100;
-
-    // Much more relaxed profit requirements based on current market conditions
-    const minProfitForPrice = currentPrice < 5 ? 0.25 :   // €0.25 for very cheap items
-                             currentPrice < 20 ? 0.50 :   // €0.50 for low-mid items
-                             currentPrice < 50 ? 1.00 :   // €1.00 for mid items
-                             currentPrice < 100 ? 2.00 :  // €2.00 for higher mid items  
-                             currentPrice < 500 ? 3.00 :  // €3.00 for expensive items
-                             5.00;                         // €5.00 for very expensive items
-    
-    const minMarginForPrice = currentPrice < 5 ? 3 :      // 3% for very cheap items
-                             currentPrice < 20 ? 4 :      // 4% for low-mid items
-                             currentPrice < 50 ? 5 :      // 5% for mid items
-                             currentPrice < 100 ? 6 :     // 6% for higher mid items
-                             currentPrice < 500 ? 3 :     // 3% for expensive items (lower margin acceptable)
-                             2;                            // 2% for very expensive items
-
-    // Use user settings if they're lower than our defaults (more permissive)
-    const actualMinProfit = Math.min(settings.minProfit || minProfitForPrice, minProfitForPrice);
-    const actualMinMargin = Math.min(settings.minProfitMargin || minMarginForPrice, minMarginForPrice);
-    
-    if (profit < actualMinProfit || profitMargin < actualMinMargin) {
-        console.log(`[Filter] REJECTED: Profit/margin too low (Profit: €${profit.toFixed(2)} < €${actualMinProfit}, Margin: ${profitMargin.toFixed(1)}% < ${actualMinMargin}%) for €${currentPrice} item`);
-        return null;
-    }
-
-    // Much more lenient volatility check (allow up to 100% volatility)
-    const maxVolatility = 1.0; // 100% volatility allowed
-    if (vol7 > maxVolatility) {
-        console.log(`[Filter] REJECTED: Too volatile (${(vol7*100).toFixed(1)}% > ${maxVolatility*100}%) for €${currentPrice} item`);
-        return null;
-    }
-
-    // Calculate realistic confidence score
-    let profitConfidence = 40; // Lower base confidence
-
-    // Volume-based confidence (more lenient)
-    if (v7 >= 30) profitConfidence += 25;
-    else if (v7 >= 15) profitConfidence += 15;
-    else if (v7 >= 8) profitConfidence += 10;
-
-    // Volatility confidence (more lenient)
-    if (vol7 <= 0.3) profitConfidence += 15;
-    else if (vol7 <= 0.6) profitConfidence += 5;
-
-    // Recent activity confidence
-    if (metrics.m24 && v24 >= 5) profitConfidence += 10;
-    
-    profitConfidence = Math.max(20, Math.min(85, profitConfidence));
-    
-    console.log(`[Filter] ACCEPTED: €${currentPrice} item - Profit: €${profit.toFixed(2)} (${profitMargin.toFixed(1)}%), Sales: ${v7}, Confidence: ${profitConfidence}%`);
-    
-    return {
-        currentPrice,
-        achievablePrice: parseFloat(achievablePrice.toFixed(2)),
-        netSellingPrice: parseFloat(netSellingPrice.toFixed(2)),
-        effectiveCost: parseFloat(effectiveCost.toFixed(2)),
-        profit: parseFloat(profit.toFixed(2)),
-        profitMargin: parseFloat(profitMargin.toFixed(2)),
-        profitConfidence,
-        feeAmount: parseFloat((achievablePrice * 0.08).toFixed(2)),
-        buySlippage: parseFloat((currentPrice * 0.002).toFixed(2)),
-        metrics: {
-            volatility7d: parseFloat(vol7.toFixed(3)),
-            sales7d: v7,
-            sales24h: v24,
-            consistency: apiData.last_30_days?.volume > 0 ? parseFloat(((v7 * 4.3) / apiData.last_30_days.volume).toFixed(2)) : null
-        },
-        factors: priceData.factors,
-        baseMedian: priceData.baseMedian
-    };
-}
-
-/**
- * UPDATED MAIN ANALYSIS FUNCTION
- */
-async function analyzePrices(items, minProfit, minProfitMargin, currency, settings = {}) {
-    const analyzedItems = [];
-    const uniqueItems = [...new Set(items.map(item => item.marketHashName))];
-    
-    console.log(`[Analysis] Processing ${uniqueItems.length} unique items with REALISTIC analysis...`);
-    console.log(`[Analysis] Settings: minProfit=€${minProfit}, minMargin=${minProfitMargin}%, currency=${currency}`);
-    console.log(`[Analysis] First few items:`, items.slice(0, 3).map(item => `${item.marketHashName} €${item.price}`));
-    
-    // Create optimal batches
-    const batches = createOptimalBatches(uniqueItems);
-    
-    if (batches.length > MAX_REQUESTS_PER_WINDOW) {
-        console.warn(`[Analysis] Warning: ${batches.length} batches exceed rate limit of ${MAX_REQUESTS_PER_WINDOW} requests per 5 minutes`);
-        console.warn(`[Analysis] Processing first ${MAX_REQUESTS_PER_WINDOW} batches only`);
-    }
-    
-    const batchesToProcess = batches.slice(0, MAX_REQUESTS_PER_WINDOW);
-    
-    for (let i = 0; i < batchesToProcess.length; i++) {
-        const batch = batchesToProcess[i];
-        console.log(`[Analysis] Processing batch ${i + 1}/${batchesToProcess.length} (${batch.length} items)`);
-        
-        const batchSalesHistory = await fetchSalesHistoryBatch(batch, currency);
-        
-        console.log(`[Analysis] Batch ${i + 1} returned data for ${Object.keys(batchSalesHistory).length} items`);
-        
-        // Process each item in the batch
-        for (const marketHashName of batch) {
-            const apiData = batchSalesHistory[marketHashName];
-            
-            if (apiData) {
-                console.log(`[Analysis] Processing ${marketHashName}: 7d sales=${apiData.last_7_days?.volume || 0}, 7d median=€${apiData.last_7_days?.median || 'N/A'}`);
-                
-                const marketItems = items.filter(item => item.marketHashName === marketHashName);
-                
-                for (const { price, wear } of marketItems) {
-                    console.log(`[Analysis] Analyzing ${marketHashName} (${wear}) at €${price}`);
-                    const analysis = analyzeItemOpportunity(price, apiData, minProfit, minProfitMargin, settings);
-                    
-                    if (analysis) {
-                        console.log(`[Analysis] ✅ FOUND DEAL: ${marketHashName} - Profit: €${analysis.profit}, Margin: ${analysis.profitMargin}%`);
-                        analyzedItems.push({
-                            marketHashName,
-                            wear,
-                            ...analysis
-                        });
-                    } else {
-                        console.log(`[Analysis] ❌ Rejected: ${marketHashName} (${wear}) at €${price}`);
-                    }
-                }
-            } else {
-                console.log(`[Analysis] No API data for: ${marketHashName}`);
-            }
-        }
-    }
-    
-    // Sort by profit margin descending
-    analyzedItems.sort((a, b) => b.profitMargin - a.profitMargin);
-    
-    console.log(`[Analysis] FINAL RESULT: Found ${analyzedItems.length} profitable deals using REALISTIC analysis`);
-    if (analyzedItems.length > 0) {
-        console.log(`[Analysis] Top deal: ${analyzedItems[0].marketHashName} - ${analyzedItems[0].profitMargin.toFixed(2)}% margin`);
-    }
-    
-    return analyzedItems;
-}
-
 // API endpoint to receive prices and return deals
 app.post('/analyze-prices', async (req, res) => {
     const { items, settings } = req.body;
@@ -942,23 +266,123 @@ app.post('/analyze-prices', async (req, res) => {
         return res.status(400).json({ error: 'Invalid input. Expected an array of items and settings.' });
     }
 
-    console.log(`[Backend] Received ${items.length} items for ENHANCED analysis.`);
+    console.log(`[Backend] Received ${items.length} items for analysis.`);
+    console.log(`[Backend] Sample items:`, items.slice(0, 3));
+    
+    // Debug StatTrak items specifically
+    const statTrakItems = items.filter(item => item.name && item.name.includes('StatTrak'));
+    if (statTrakItems.length > 0) {
+        console.log(`[StatTrak Debug] Found ${statTrakItems.length} StatTrak items:`);
+        statTrakItems.slice(0, 3).forEach(item => {
+            console.log(`  - Name: "${item.name}"`);
+            console.log(`  - Unicode chars: ${Array.from(item.name).map(c => `${c}(${c.charCodeAt(0)})`).join(' ')}`);
+        });
+    }
 
     try {
-        const analyzedItems = await analyzePrices(
-            items, 
-            settings.minProfit, 
-            settings.minProfitMargin, 
-            settings.currency,
-            settings
-        );
+        const analyzedItems = [];
+        
+        // Extract unique market hash names (item names)
+        const uniqueNames = [...new Set(items.map(item => item.name).filter(name => name && name.trim()))];
+        console.log(`[Backend] Extracted ${uniqueNames.length} unique item names.`);
+
+        if (uniqueNames.length === 0) {
+            return res.json({ 
+                analyzedItems, 
+                summary: { totalProcessed: 0, profitableFound: 0, message: 'No valid item names found' }
+            });
+        }
+
+        // Create optimal batches
+        const batches = createOptimalBatches(uniqueNames);
+        console.log(`[Backend] Split into ${batches.length} batches.`);
+
+        // Fetch sales data for all batches
+        const allSalesData = {};
+        for (let i = 0; i < batches.length; i++) {
+            console.log(`[Backend] Processing batch ${i + 1}/${batches.length} (${batches[i].length} items)`);
+            const batchData = await fetchSalesHistoryBatch(batches[i], settings.currency || 'EUR');
+            Object.assign(allSalesData, batchData);
+            
+            // Small delay between batches to be respectful
+            if (i < batches.length - 1) {
+                await delay(100);
+            }
+        }
+
+        console.log(`[Backend] Got sales data for ${Object.keys(allSalesData).length} items.`);
+        
+        // Debug which StatTrak items got API data
+        if (statTrakItems.length > 0) {
+            console.log(`[StatTrak Debug] API Response check:`);
+            statTrakItems.slice(0, 3).forEach(item => {
+                const hasData = allSalesData[item.name];
+                console.log(`  - "${item.name}": ${hasData ? 'HAS DATA' : 'NO DATA'}`);
+                if (!hasData) {
+                    // Check if a similar name exists in the response
+                    const similarKeys = Object.keys(allSalesData).filter(key => 
+                        key.toLowerCase().includes(item.name.toLowerCase().replace(/[★™]/g, '').trim())
+                    );
+                    if (similarKeys.length > 0) {
+                        console.log(`    Similar keys found: ${similarKeys.slice(0, 2)}`);
+                    }
+                }
+            });
+        }
+
+        // Analyze each item for profitability
+        for (const item of items) {
+            if (!item.name || !item.skinportPrice) continue;
+
+            const salesData = allSalesData[item.name];
+            if (!salesData) {
+                console.log(`[Backend] No sales data for: ${item.name}`);
+                continue;
+            }
+
+            // Calculate statistics
+            const prices = salesData.map(sale => sale.price);
+            if (prices.length === 0) continue;
+
+            const avgPrice = prices.reduce((sum, price) => sum + price, 0) / prices.length;
+            const minPrice = Math.min(...prices);
+            const maxPrice = Math.max(...prices);
+            
+            // Calculate profit
+            const skinportPriceNum = parseFloat(item.skinportPrice.replace(',', '.'));
+            const profitAmount = avgPrice - skinportPriceNum;
+            const profitPercentage = ((profitAmount / skinportPriceNum) * 100);
+
+            // Check if it meets profit criteria
+            const minProfitAmount = parseFloat(settings.minProfitAmount || 0);
+            const minProfitPercentage = parseFloat(settings.minProfitPercentage || 0);
+
+            if (profitAmount >= minProfitAmount && profitPercentage >= minProfitPercentage) {
+                analyzedItems.push({
+                    ...item,
+                    steamAvgPrice: avgPrice.toFixed(2),
+                    steamMinPrice: minPrice.toFixed(2),
+                    steamMaxPrice: maxPrice.toFixed(2),
+                    profitAmount: profitAmount.toFixed(2),
+                    profitPercentage: profitPercentage.toFixed(1),
+                    salesCount: salesData.length,
+                    lastSaleDate: salesData[0]?.date || 'Unknown'
+                });
+                
+                console.log(`[Profit] Found profitable item: ${item.name} - €${profitAmount.toFixed(2)} (${profitPercentage.toFixed(1)}%)`);
+            }
+        }
+
+        console.log(`[Backend] Analysis complete. Found ${analyzedItems.length} profitable items.`);
+        
         res.json({ 
             analyzedItems,
             summary: {
                 totalProcessed: items.length,
                 profitableFound: analyzedItems.length,
-                analysisType: 'ENHANCED',
-                includedFactors: ['price_trends', 'liquidity', 'volatility', 'risk_assessment', 'fee_calculation', 'user_filters', 'market_timing', 'supply_demand']
+                uniqueItemsChecked: uniqueNames.length,
+                salesDataFound: Object.keys(allSalesData).length,
+                batchesProcessed: batches.length
             }
         });
     } catch (error) {
@@ -983,5 +407,5 @@ app.get('/health', (req, res) => {
 // Start Express server
 app.listen(port, () => {
     console.log(`Enhanced Skinport Tracker API listening on port ${port}`);
-    console.log(`Using MEDIAN prices and comprehensive risk analysis with user filters`);
-}); 
+    console.log(`Server started successfully with basic API endpoint`);
+});
