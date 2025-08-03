@@ -26,6 +26,23 @@ app.use(cors());
 app.use(express.json());
 
 /**
+ * Normalize item names for consistent matching between server and content script
+ */
+function normalizeItemName(name) {
+    if (!name) return null;
+    
+    return name.trim()
+        // Normalize StatTrak symbol
+        .replace(/StatTrak™?/g, 'StatTrak™')
+        // Normalize knife star symbol
+        .replace(/★/g, '★')
+        // Normalize spaces
+        .replace(/\s+/g, ' ')
+        // Remove any trailing/leading spaces
+        .trim();
+}
+
+/**
  * Multi-timeframe analysis to find the best data source and detect trends
  */
 function analyzeMultiTimeframe(salesData) {
@@ -766,7 +783,10 @@ app.post('/analyze-prices', async (req, res) => {
         const analyzedItems = [];
         
         // Extract unique market hash names (item names)
-        const uniqueNames = [...new Set(items.map(item => item.marketHashName || item.name).filter(name => name && name.trim()))];
+        const uniqueNames = [...new Set(items.map(item => {
+            const rawName = item.marketHashName || item.name;
+            return normalizeItemName(rawName);
+        }).filter(name => name && name.trim()))];
         console.log(`[Backend] Extracted ${uniqueNames.length} unique item names.`);
 
         if (uniqueNames.length === 0) {
@@ -814,7 +834,8 @@ app.post('/analyze-prices', async (req, res) => {
 
         // Analyze each item for profitability using BOTH current market + sales history
         for (const item of items) {
-            const itemName = item.marketHashName || item.name;
+            const rawItemName = item.marketHashName || item.name;
+            const itemName = normalizeItemName(rawItemName);
             const itemPrice = item.price || item.skinportPrice;
             
             if (!itemName || !itemPrice) continue;
@@ -932,6 +953,22 @@ app.post('/analyze-prices', async (req, res) => {
             const marketSpread = currentMaxPrice - currentMinPrice;
             const marketVolatility = (marketSpread / currentMeanPrice) * 100;
             
+            // Calculate weekly flip viability and enhanced sell time estimates
+            const weeklyFlipAnalysis = analyzeWeeklyFlipViability(itemName, priceData, salesData, multiTimeframeAnalysis.trend, marketVolatility);
+            
+            // Enhanced sell time estimate based on weekly flip analysis
+            let enhancedTimeEstimate = timeEstimate; // Default from confidence
+            if (weeklyFlipAnalysis && weeklyFlipAnalysis.estimatedSellDays) {
+                enhancedTimeEstimate = weeklyFlipAnalysis.estimatedSellDays;
+            }
+            
+            // Calculate market metrics for volatility display
+            const marketMetrics = {
+                vol7: marketVolatility / 100, // Convert to decimal for percentage display
+                volatilityLevel: marketVolatility > 15 ? 'HIGH' : marketVolatility > 8 ? 'MEDIUM' : 'LOW',
+                priceStability: weeklyFlipAnalysis ? weeklyFlipAnalysis.priceStability : 'Unknown'
+            };
+            
             // Create analyzed item with smart pricing
             analyzedItems.push({
                 ...item,
@@ -962,12 +999,26 @@ app.post('/analyze-prices', async (req, res) => {
                 confidence: overallConfidence.level,
                 confidenceScore: overallConfidence.score,
                 confidenceFactors: overallConfidence.factors,
-                timeEstimate: timeEstimate,
+                timeEstimate: enhancedTimeEstimate,
                 pricingStrategy: smartPricing.strategy,
                 pricingReasoning: smartPricing.reasoning,
                 trend: multiTimeframeAnalysis.trend,
                 pricePosition: Math.round(pricePosition * 100),
                 marketVolatility: marketVolatility.toFixed(1),
+                
+                // Market metrics for volatility display
+                metrics: marketMetrics,
+                
+                // Weekly flip trading analysis
+                weeklyFlipTrading: weeklyFlipAnalysis ? {
+                    score: weeklyFlipAnalysis.score,
+                    recommendation: weeklyFlipAnalysis.recommendation,
+                    estimatedSellDays: weeklyFlipAnalysis.estimatedSellDays,
+                    weeklyVolume: weeklyFlipAnalysis.weeklyVolume,
+                    priceStability: weeklyFlipAnalysis.priceStability,
+                    sellProbability: weeklyFlipAnalysis.sellProbability,
+                    reasons: weeklyFlipAnalysis.reasons
+                } : null,
                 
                 // Alternative pricing strategies for comparison
                 strategies: {
@@ -1013,6 +1064,12 @@ app.post('/analyze-prices', async (req, res) => {
         }
 
         console.log(`[Backend] Analysis complete. Found ${analyzedItems.length} profitable items.`);
+        
+        // Add debug logging for item matching
+        console.log(`[DEBUG] Final item names for matching:`);
+        analyzedItems.slice(0, 5).forEach((item, index) => {
+            console.log(`  ${index + 1}. Server: "${item.marketHashName}" | Wear: "${item.wear}" | Profit: €${item.profitAmount}`);
+        });
         
         res.json({ 
             analyzedItems,
