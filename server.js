@@ -64,10 +64,10 @@ function createOptimalBatches(uniqueItems, maxUrlLength = 7000) {
     
     // Helper function to clean and validate item names
     const cleanItemName = (name) => {
-        // Remove any invalid characters and normalize
+        // Remove any invalid characters and normalize, but preserve StatTrak symbols
         return name.trim()
-            .replace(/[^\x20-\x7E]/g, '') // Remove non-printable characters
-            .replace(/\s+/g, ' ');        // Normalize spaces
+            .replace(/[^\x20-\x7E★™]/g, '') // Remove non-printable characters but keep ★ and ™
+            .replace(/\s+/g, ' ');          // Normalize spaces
     };
 
     // Filter and clean items before batching
@@ -114,7 +114,7 @@ async function fetchSalesHistoryBatch(marketHashNames, currency) {
         const isValid = typeof name === 'string' && 
                        name.trim().length > 0 && 
                        name.length < 100 &&
-                       !/[^\x20-\x7E]/.test(name); // Only printable ASCII characters
+                       !/[^\x20-\x7E★™]/.test(name); // Allow printable ASCII characters plus ★ and ™
         
         if (!isValid) {
             console.log(`[API] Skipping invalid market_hash_name: ${name}`);
