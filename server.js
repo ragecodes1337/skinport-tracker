@@ -697,6 +697,9 @@ app.post('/analyze-prices', async (req, res) => {
             const has24hHighActivity = salesData.last_24_hours && salesData.last_24_hours.volume >= 5;
             const volumeConsistency = has24hHighActivity ? 'EXCELLENT' : hasRecentActivity ? 'GOOD' : 'POOR';
             
+            // Define dailyVolume for use throughout this section
+            const dailyVolume = salesData.last_24_hours?.volume || 0;
+            
             // INSTANT FLIP: Volume-first liquidity criteria with 24h activity bonus
             let isHighVolumeItem = false;
             let isUltraHighVolumeItem = volume >= 500; // Lower threshold for instant flips
@@ -728,7 +731,6 @@ app.post('/analyze-prices', async (req, res) => {
                 }
             } else {
                 // Adjust volume requirements based on 24h activity and total volume
-                const dailyVolume = salesData.last_24_hours?.volume || 0;
                 
                 // Instant flip scoring: daily activity is CRITICAL
                 if (dailyVolume >= 10 && volume >= 100) {
