@@ -12,16 +12,8 @@ const cache = new NodeCache({ stdTTL: 300, checkperiod: 120 });
 
 // Skinport API Constants
 const SKINPORT_API_URL = 'https://api.skinport.com/v1';
-const SKINPORT_API_KEY = process.env.SKINPORT_API_KEY; // Add API key support
 const APP_ID_CSGO = 730;
 const SKINPORT_FEE = 0.08; // 8% seller fee
-
-// Steam Community Market API (backup)
-const STEAM_API_URL = 'https://steamcommunity.com/market/priceoverview';
-const STEAM_FEE = 0.15; // 15% Steam fee
-
-// CSFloat API (alternative backup)
-const CSFLOAT_API_URL = 'https://csfloat.com/api/v1';
 
 // Rate limiting configuration - Skinport allows 8 requests per 5 minutes
 const RATE_LIMIT_WINDOW = 5 * 60 * 1000; // 5 minutes in milliseconds
