@@ -191,12 +191,50 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
         basePrice *= 0.99; // Minimal penalty from 0.97 (was 3% penalty, now 1%)
     }
     
-    // Ensure we don't price below minimum profit after fees (accounts for 8% Skinport fee + minimum margin)
-    const minProfitMargin = 0.03; // 3% minimum profit margin above break-even
-    const minProfitablePrice = buyPrice * (1 + minProfitMargin) / (1 - SKINPORT_FEE); // 3% profit after 8% fees
+    // MARKET REALITY CHECK FIRST - Don't force profit where market won't support it
+    const salesAvgPrice = salesData.avg;
+    const marketTolerancePrice = salesAvgPrice * 1.10; // Max 110% of recent sales average
+    
+    if (basePrice > marketTolerancePrice) {
+        console.log(`[Market Reality] ${buyPrice.toFixed(2)} item: basePrice €${basePrice.toFixed(2)} exceeds market tolerance €${marketTolerancePrice.toFixed(2)} (110% of €${salesAvgPrice.toFixed(2)} avg) - REJECTING`);
+        return {
+            achievablePrice: 0, // Signal rejection
+            confidence: 'REJECTED',
+            strategy: 'MARKET_REJECTED',
+            reasoning: `Price €${basePrice.toFixed(2)} exceeds market reality (110% of €${salesAvgPrice.toFixed(2)} avg sales)`
+        };
+    }
+    
+    // Sliding scale profit margins based on item value (realistic expectations)
+    let minProfitMargin;
+    if (buyPrice < 50) {
+        minProfitMargin = 0.025; // 2.5% for small items
+    } else if (buyPrice < 200) {
+        minProfitMargin = 0.015; // 1.5% for medium items  
+    } else {
+        minProfitMargin = 0.008; // 0.8% for expensive items
+    }
+    
+    // Calculate minimum profitable price with realistic margins
+    const minProfitablePrice = buyPrice * (1 + minProfitMargin) / (1 - SKINPORT_FEE);
+    
+    // Only apply minimum profit as final safety check, not primary driver
     if (basePrice < minProfitablePrice) {
-        basePrice = minProfitablePrice;
-        reasoning += ', adjusted to minimum profitable price with 3% margin after fees';
+        const adjustedPrice = minProfitablePrice;
+        
+        // But still respect market reality - if even minimum profit exceeds market tolerance, reject
+        if (adjustedPrice > marketTolerancePrice) {
+            console.log(`[Market Reality] ${buyPrice.toFixed(2)} item: Even minimum profit €${adjustedPrice.toFixed(2)} exceeds market tolerance €${marketTolerancePrice.toFixed(2)} - REJECTING`);
+            return {
+                achievablePrice: 0, // Signal rejection
+                confidence: 'REJECTED',
+                strategy: 'PROFIT_IMPOSSIBLE',
+                reasoning: `Even ${(minProfitMargin*100).toFixed(1)}% margin (€${adjustedPrice.toFixed(2)}) exceeds market reality`
+            };
+        }
+        
+        basePrice = adjustedPrice;
+        reasoning += `, adjusted to minimum ${(minProfitMargin*100).toFixed(1)}% margin (€${(minProfitMargin*buyPrice).toFixed(2)} profit)`;
     }
     
     // Ensure we don't price way above what actually sells
@@ -871,6 +909,13 @@ app.post('/analyze-prices', async (req, res) => {
             
             // Calculate smart achievable price based on sales data
             const smartPricing = calculateSmartAchievablePrice(skinportBuyPrice, marketData, multiTimeframeAnalysis, currentMinPrice);
+            
+            // Handle market-rejected items (pricing exceeds market reality)
+            if (smartPricing.achievablePrice === 0 || smartPricing.confidence === 'REJECTED') {
+                console.log(`[Market Reality] ${itemName}: ${smartPricing.reasoning} - skipping`);
+                continue;
+            }
+            
             const achievableGrossPrice = smartPricing.achievablePrice;
             const achievableNetPrice = achievableGrossPrice * (1 - SKINPORT_FEE);
             
@@ -885,7 +930,7 @@ app.post('/analyze-prices', async (req, res) => {
             console.log(`  Achievable Price: €${achievableGrossPrice.toFixed(2)} → €${achievableNetPrice.toFixed(2)} net`);
             console.log(`  Profit: €${profitAmount.toFixed(2)} (${profitPercentage.toFixed(1)}%)`);
             
-            // Skip items with no profit potential
+            // Skip items with no profit potential (should be rare now due to market reality checks)
             if (profitAmount <= 0) {
                 console.log(`[Smart Pricing] ${itemName}: No profit potential - skipping`);
                 continue;
@@ -1030,12 +1075,12 @@ app.post('/analyze-prices', async (req, res) => {
                     }
                 },
                 
-                // Recommendation based on confidence and profit (UPDATED FOR REALISTIC MARGINS)
-                recommendation: overallConfidence.level === 'HIGH' && profitPercentage > 5 ? 'STRONG_BUY' :
-                               overallConfidence.level === 'HIGH' && profitPercentage > 3 ? 'BUY' :
-                               overallConfidence.level === 'MEDIUM' && profitPercentage > 6 ? 'BUY' :
-                               overallConfidence.level === 'MEDIUM' && profitPercentage > 3 ? 'CONSIDER' :
-                               profitPercentage > 2 ? 'CONSIDER' : 'HOLD'
+                // Recommendation based on confidence and profit (REALISTIC MARKET-BASED MARGINS)
+                recommendation: overallConfidence.level === 'HIGH' && profitPercentage > 3 ? 'STRONG_BUY' :
+                               overallConfidence.level === 'HIGH' && profitPercentage > 1.5 ? 'BUY' :
+                               overallConfidence.level === 'MEDIUM' && profitPercentage > 4 ? 'BUY' :
+                               overallConfidence.level === 'MEDIUM' && profitPercentage > 2 ? 'CONSIDER' :
+                               profitPercentage > 0.8 ? 'CONSIDER' : 'HOLD'
             });
             
             console.log(`[Smart Analysis] ${itemName}:`);
