@@ -129,7 +129,7 @@ function analyzeFloatValue(itemName, currentPrice, marketData = null) {
     const range = ranges.max - ranges.min;
     const floatPosition = (explicitFloatValue - ranges.min) / range;
     
-    // Determine float tier and pricing multiplier with market awareness
+    // Determine float tier and pricing multiplier with market awareness - ENHANCED GRANULARITY
     let floatTier, floatMultiplier, floatAnalysis;
     
     if (explicitFloatValue <= ranges.premium) {
@@ -137,18 +137,33 @@ function analyzeFloatValue(itemName, currentPrice, marketData = null) {
         floatTier = 'PREMIUM';
         floatMultiplier = getConservativeFloatMultiplier(wearCondition, 'PREMIUM');
         floatAnalysis = `Premium ${wearCondition} float (${explicitFloatValue}) - conservative ${((floatMultiplier - 1) * 100).toFixed(0)}% adjustment`;
+    } else if (floatPosition <= 0.15) {
+        // Excellent float (top 15% of wear range) - NEW TIER
+        floatTier = 'EXCELLENT';
+        floatMultiplier = getConservativeFloatMultiplier(wearCondition, 'EXCELLENT');
+        floatAnalysis = `Excellent ${wearCondition} float (${explicitFloatValue}) - granular ${((floatMultiplier - 1) * 100).toFixed(0)}% adjustment`;
     } else if (floatPosition <= 0.3) {
         // Good float (bottom 30% of wear range)
         floatTier = 'GOOD';
         floatMultiplier = getConservativeFloatMultiplier(wearCondition, 'GOOD');
         floatAnalysis = `Good ${wearCondition} float (${explicitFloatValue}) - conservative ${((floatMultiplier - 1) * 100).toFixed(0)}% adjustment`;
+    } else if (floatPosition <= 0.5) {
+        // Average-Good float (30-50% range) - NEW TIER
+        floatTier = 'AVERAGE_GOOD';
+        floatMultiplier = getConservativeFloatMultiplier(wearCondition, 'AVERAGE_GOOD');
+        floatAnalysis = `Above-average ${wearCondition} float (${explicitFloatValue}) - slight ${((floatMultiplier - 1) * 100).toFixed(0)}% adjustment`;
     } else if (floatPosition <= 0.7) {
-        // Average float (middle 40% of wear range)
+        // Average float (middle 20% of wear range)
         floatTier = 'AVERAGE';
         floatMultiplier = 1.0;
         floatAnalysis = `Average ${wearCondition} float (${explicitFloatValue}) - standard pricing`;
+    } else if (floatPosition <= 0.85) {
+        // Below-Average float (70-85% range) - NEW TIER
+        floatTier = 'BELOW_AVERAGE';
+        floatMultiplier = getConservativeFloatMultiplier(wearCondition, 'BELOW_AVERAGE');
+        floatAnalysis = `Below-average ${wearCondition} float (${explicitFloatValue}) - minor ${((1 - floatMultiplier) * 100).toFixed(0)}% discount`;
     } else {
-        // Poor float (top 30% of wear range)
+        // Poor float (top 15% of wear range)
         floatTier = 'POOR';
         floatMultiplier = getConservativeFloatMultiplier(wearCondition, 'POOR');
         floatAnalysis = `Poor ${wearCondition} float (${explicitFloatValue}) - conservative ${((1 - floatMultiplier) * 100).toFixed(0)}% discount`;
@@ -169,15 +184,24 @@ function analyzeFloatValue(itemName, currentPrice, marketData = null) {
 }
 
 /**
- * Conservative float multipliers to prevent unrealistic pricing
+ * Enhanced granular float multipliers for better within-wear-range pricing
  */
 function getConservativeFloatMultiplier(wearCondition, floatTier) {
     const multipliers = {
         'PREMIUM': {
-            'FN': 1.08, 'MW': 1.06, 'FT': 1.04, 'WW': 1.03, 'BS': 1.02
+            'FN': 1.08, 'MW': 1.06, 'FT': 1.05, 'WW': 1.03, 'BS': 1.02
+        },
+        'EXCELLENT': {
+            'FN': 1.05, 'MW': 1.04, 'FT': 1.03, 'WW': 1.02, 'BS': 1.015
         },
         'GOOD': {
             'FN': 1.04, 'MW': 1.03, 'FT': 1.02, 'WW': 1.015, 'BS': 1.01
+        },
+        'AVERAGE_GOOD': {
+            'FN': 1.02, 'MW': 1.015, 'FT': 1.01, 'WW': 1.005, 'BS': 1.005
+        },
+        'BELOW_AVERAGE': {
+            'FN': 0.98, 'MW': 0.985, 'FT': 0.99, 'WW': 0.995, 'BS': 0.995
         },
         'POOR': {
             'FN': 0.96, 'MW': 0.97, 'FT': 0.98, 'WW': 0.985, 'BS': 0.99
@@ -191,11 +215,11 @@ function getConservativeFloatMultiplier(wearCondition, floatTier) {
  * Estimate float tier from market position when explicit float not available
  */
 function estimateFloatFromMarketPosition(currentPrice, marketData, wearCondition) {
-    const avgPrice = marketData.mean_price || marketData.avg;
+    const medianPrice = marketData.median_price || marketData.median;
     const minPrice = marketData.min_price || marketData.min;
     const maxPrice = marketData.max_price || marketData.max;
     
-    if (!avgPrice || !minPrice || !maxPrice) {
+    if (!medianPrice || !minPrice || !maxPrice) {
         return {
             estimatedTier: 'UNKNOWN',
             multiplier: 1.0,
@@ -302,28 +326,28 @@ function analyzeMultiTimeframe(salesData) {
     const tf7d = timeframes.find(t => t.period === '7d');
     if (tf7d && tf7d.data.volume >= 1) {
         bestTimeframe = tf7d;
-        console.log(`[Timeframe Selection] Using 7d data: ${tf7d.data.volume} sales, €${tf7d.data.avg.toFixed(2)} avg - WEEKLY REALITY`);
+        console.log(`[Timeframe Selection] Using 7d data: ${tf7d.data.volume} sales, €${(tf7d.data.median || tf7d.data.avg).toFixed(2)} median - WEEKLY REALITY`);
     }
     // Second choice: 24h with decent volume (only if no 7d data)
     else {
         const tf24h = timeframes.find(t => t.period === '24h');
         if (tf24h && tf24h.data.volume >= 3) {
             bestTimeframe = tf24h;
-            console.log(`[Timeframe Selection] Using 24h data: ${tf24h.data.volume} sales, €${tf24h.data.avg.toFixed(2)} avg - DAILY ACTIVITY`);
+            console.log(`[Timeframe Selection] Using 24h data: ${tf24h.data.volume} sales, €${(tf24h.data.median || tf24h.data.avg).toFixed(2)} median - DAILY ACTIVITY`);
         }
         // Third choice: 30d with some volume
         else {
             const tf30d = timeframes.find(t => t.period === '30d');
             if (tf30d && tf30d.data.volume >= 5) {
                 bestTimeframe = tf30d;
-                console.log(`[Timeframe Selection] Using 30d data: ${tf30d.data.volume} sales, €${tf30d.data.avg.toFixed(2)} avg - MONTHLY SAMPLE`);
+                console.log(`[Timeframe Selection] Using 30d data: ${tf30d.data.volume} sales, €${(tf30d.data.median || tf30d.data.avg).toFixed(2)} median - MONTHLY SAMPLE`);
             }
             // Fourth choice: 90d with reasonable volume
             else {
                 const tf90d = timeframes.find(t => t.period === '90d');
                 if (tf90d && tf90d.data.volume >= 8) {
                     bestTimeframe = tf90d;
-                    console.log(`[Timeframe Selection] Using 90d data: ${tf90d.data.volume} sales, €${tf90d.data.avg.toFixed(2)} avg - QUARTERLY TREND`);
+                    console.log(`[Timeframe Selection] Using 90d data: ${tf90d.data.volume} sales, €${(tf90d.data.median || tf90d.data.avg).toFixed(2)} median - QUARTERLY TREND`);
                 }
                 // Last resort: Best available with WARNING
                 else {
@@ -342,18 +366,22 @@ function analyzeMultiTimeframe(salesData) {
         return null; // Signal to calling function that this item should be skipped
     }
     
-    // Detect price trend using recent vs older data
+    // Detect price trend using recent vs older data - using median prices for better stability
     let trend = 'STABLE';
     const recent24h = timeframes.find(t => t.period === '24h');
     const recent7d = timeframes.find(t => t.period === '7d');
     const older30d = timeframes.find(t => t.period === '30d');
     
     if (recent24h && recent7d) {
-        const priceChange = ((recent24h.data.avg - recent7d.data.avg) / recent7d.data.avg) * 100;
+        const recent24hMedian = recent24h.data.median || recent24h.data.avg;
+        const recent7dMedian = recent7d.data.median || recent7d.data.avg;
+        const priceChange = ((recent24hMedian - recent7dMedian) / recent7dMedian) * 100;
         if (priceChange > 8) trend = 'RISING';
         else if (priceChange < -8) trend = 'FALLING';
     } else if (recent7d && older30d) {
-        const priceChange = ((recent7d.data.avg - older30d.data.avg) / older30d.data.avg) * 100;
+        const recent7dMedian = recent7d.data.median || recent7d.data.avg;
+        const older30dMedian = older30d.data.median || older30d.data.avg;
+        const priceChange = ((recent7dMedian - older30dMedian) / older30dMedian) * 100;
         if (priceChange > 10) trend = 'RISING';
         else if (priceChange < -10) trend = 'FALLING';
     }
@@ -384,20 +412,22 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
     const salesData = multiTimeframeData.bestTimeframe.data;
     const trend = multiTimeframeData.trend;
     
-    // Calculate various price points from sales data
+    // Calculate various price points from sales data - MEDIAN-FIRST approach
     const salesMedian = salesData.median || salesData.avg;
-    const salesAvg = salesData.avg;
+    const salesAvg = salesData.avg; // Keep for comparison only
     const salesMin = salesData.min;
     const salesMax = salesData.max;
     const salesVolume = salesData.volume;
     
-    // CRITICAL: Check against RECENT sales averages (24h/7d priority)
+    // CRITICAL: Check against RECENT sales medians (24h/7d priority) for better outlier resistance
     const recentDataQuality = multiTimeframeData.recentDataQuality;
     const bestPeriod = multiTimeframeData.bestTimeframe.period;
     
-    // Get most recent average for reality check - ENHANCED LOGIC
-    const recent24hAvg = multiTimeframeData.allTimeframes.find(t => t.period === '24h')?.data.avg;
-    const recent7dAvg = multiTimeframeData.allTimeframes.find(t => t.period === '7d')?.data.avg;
+    // Get most recent median for reality check - MEDIAN-BASED LOGIC
+    const recent24hMedian = multiTimeframeData.allTimeframes.find(t => t.period === '24h')?.data.median || 
+                           multiTimeframeData.allTimeframes.find(t => t.period === '24h')?.data.avg;
+    const recent7dMedian = multiTimeframeData.allTimeframes.find(t => t.period === '7d')?.data.median || 
+                          multiTimeframeData.allTimeframes.find(t => t.period === '7d')?.data.avg;
     
     // STEP 1: PROFITABILITY-FIRST ANALYSIS - Calculate what we NEED to make profit
     // FIX: Use ACTUAL 7d volume, fallback to reasonable estimate based on SELECTED timeframe
@@ -439,14 +469,14 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
     // Calculate MINIMUM profitable price (what we MUST get to make profit)
     const minProfitablePrice = buyPrice * (1 + minProfitMargin) / (1 - SKINPORT_FEE);
     
-    console.log(`[Simplified Pricing] €${buyPrice.toFixed(2)} item: Need €${minProfitablePrice.toFixed(2)} minimum (${(minProfitMargin*100).toFixed(1)}% margin) [${weeklyVolume} sales/week]`);
+    console.log(`[Median-Based Pricing] €${buyPrice.toFixed(2)} item: Need €${minProfitablePrice.toFixed(2)} minimum (${(minProfitMargin*100).toFixed(1)}% margin) [${weeklyVolume} sales/week]`);
     
-    // STEP 2: Use recent market data for pricing
-    let recentMarketAvg = recent24hAvg || recent7dAvg || salesAvg;
-    let selectedPeriod = recent24hAvg ? '24h' : recent7dAvg ? '7d' : bestPeriod;
+    // STEP 2: Use recent market data for pricing - MEDIAN-BASED for outlier resistance
+    let recentMarketMedian = recent24hMedian || recent7dMedian || salesMedian;
+    let selectedPeriod = recent24hMedian ? '24h' : recent7dMedian ? '7d' : bestPeriod;
     
-    // Simple market tolerance - allow small premium above recent average
-    const marketTolerance = recentMarketAvg * 1.05; // 5% above recent average max
+    // Simple market tolerance - allow small premium above recent median (more stable)
+    const marketTolerance = recentMarketMedian * 1.05; // 5% above recent median max
     
     // Simple profitability check
     if (minProfitablePrice > marketTolerance) {
@@ -459,16 +489,16 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
         };
     }
     
-    // Simple pricing strategy - competitive pricing with profit protection
-    const listingVsRecentRatio = currentMinPrice_val / recentMarketAvg;
+    // Simple pricing strategy - competitive pricing with profit protection (MEDIAN-BASED)
+    const listingVsRecentRatio = currentMinPrice_val / recentMarketMedian;
     let basePrice;
-    let strategy = 'COMPETITIVE_PRICING';
+    let strategy = 'MEDIAN_COMPETITIVE_PRICING';
     let reasoning;
     
     if (listingVsRecentRatio > 1.05) {
-        // Current listings above recent sales - price based on recent sales
-        basePrice = Math.max(recentMarketAvg * 0.95, minProfitablePrice);
-        reasoning = `Competitive vs overpriced listings (min profit: €${minProfitablePrice.toFixed(2)})`;
+        // Current listings above recent sales median - price based on recent median sales
+        basePrice = Math.max(recentMarketMedian * 0.95, minProfitablePrice);
+        reasoning = `Competitive vs overpriced listings using median (min profit: €${minProfitablePrice.toFixed(2)})`;
     } else {
         // Price competitively but ensure profit
         basePrice = Math.max(currentMinPrice_val * 0.95, minProfitablePrice);
@@ -490,6 +520,22 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
     } else if (trend === 'FALLING') {
         basePrice *= 0.97; // Small discount for falling markets  
         reasoning += ', -3% for falling trend';
+    }
+    
+    // VELOCITY-BASED PRICING ADJUSTMENT - Key enhancement from enhanced algorithm
+    const currentListings = marketData.quantity || 1;
+    const velocity = salesVolume / (currentListings * 7);
+    
+    if (velocity < 0.03) {
+        // Low velocity - reduce price for competitiveness (similar to enhanced algorithm)
+        basePrice *= 0.97; // 3% reduction for low velocity
+        reasoning += `, -3% for low velocity (${velocity.toFixed(3)})`;
+        console.log(`[Velocity Adjustment] Applied -3% for low velocity: ${velocity.toFixed(3)}`);
+    } else if (velocity >= 0.1) {
+        // Excellent velocity - can maintain higher prices
+        basePrice *= 1.01; // 1% premium for excellent velocity
+        reasoning += `, +1% for excellent velocity (${velocity.toFixed(3)})`;
+        console.log(`[Velocity Adjustment] Applied +1% for excellent velocity: ${velocity.toFixed(3)}`);
     }
     
     // Simple confidence based on volume
@@ -521,7 +567,7 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
     const finalProfit = finalNetPrice - buyPrice;
     const finalMargin = (finalProfit / buyPrice) * 100;
     
-    console.log(`[Final Pricing] €${basePrice.toFixed(2)} gross → €${finalNetPrice.toFixed(2)} net = €${finalProfit.toFixed(2)} profit (${finalMargin.toFixed(1)}%)`);
+    console.log(`[Median-Based Final Pricing] €${basePrice.toFixed(2)} gross → €${finalNetPrice.toFixed(2)} net = €${finalProfit.toFixed(2)} profit (${finalMargin.toFixed(1)}%)`);
 
     return {
         achievablePrice: basePrice,
@@ -529,8 +575,8 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
         strategy,
         reasoning,
         salesData: {
-            median: salesMedian,
-            avg: salesAvg,
+            median: salesMedian, // Primary pricing reference
+            avg: salesAvg,       // Secondary reference for comparison
             min: salesMin,
             max: salesMax,
             volume: salesVolume,
@@ -600,11 +646,11 @@ function calculatePricingAccuracy(recommendedPrice, salesData, timeframeDays = 7
 
     const salesMin = relevantData.min;
     const salesMax = relevantData.max;
-    const salesAvg = relevantData.avg;
-    const salesMedian = relevantData.median || salesAvg;
+    const salesAvg = relevantData.avg;           // Keep for comparison
+    const salesMedian = relevantData.median || salesAvg; // Primary reference for accuracy
     const salesVolume = relevantData.volume;
 
-    // Calculate where our recommended price sits in the sales range
+    // Calculate where our recommended price sits in the sales range - using median as primary reference
     let accuracyScore = 0;
     let analysis = '';
 
@@ -612,18 +658,21 @@ function calculatePricingAccuracy(recommendedPrice, salesData, timeframeDays = 7
         // Our price is within the actual sales range - good sign
         const pricePosition = (recommendedPrice - salesMin) / (salesMax - salesMin);
         
+        // Additional check: How close to median (better outlier resistance)
+        const medianDeviation = Math.abs(recommendedPrice - salesMedian) / salesMedian;
+        
         if (pricePosition <= 0.2) {
             // Bottom 20% - very likely to sell quickly
-            accuracyScore = 90;
-            analysis = `Excellent: Price in bottom 20% of sales range (${salesVolume} sales, ${timeframeDays}d)`;
+            accuracyScore = medianDeviation <= 0.1 ? 95 : 90; // Bonus for being close to median
+            analysis = `Excellent: Price in bottom 20% of sales range, ${medianDeviation <= 0.1 ? 'close to median' : 'good positioning'} (${salesVolume} sales, ${timeframeDays}d)`;
         } else if (pricePosition <= 0.4) {
             // Bottom 40% - likely to sell
-            accuracyScore = 80;
-            analysis = `Very Good: Price in bottom 40% of sales range (${salesVolume} sales, ${timeframeDays}d)`;
+            accuracyScore = medianDeviation <= 0.15 ? 85 : 80;
+            analysis = `Very Good: Price in bottom 40% of sales range, ${medianDeviation <= 0.15 ? 'near median' : 'acceptable range'} (${salesVolume} sales, ${timeframeDays}d)`;
         } else if (pricePosition <= 0.6) {
             // Middle 60% - decent chance
-            accuracyScore = 65;
-            analysis = `Good: Price in middle of sales range (${salesVolume} sales, ${timeframeDays}d)`;
+            accuracyScore = medianDeviation <= 0.1 ? 70 : 65;
+            analysis = `Good: Price in middle of sales range, ${medianDeviation <= 0.1 ? 'aligned with median' : 'moderate positioning'} (${salesVolume} sales, ${timeframeDays}d)`;
         } else if (pricePosition <= 0.8) {
             // Top 80% - might take longer
             accuracyScore = 45;
@@ -693,7 +742,8 @@ function calculatePricingAccuracy(recommendedPrice, salesData, timeframeDays = 7
             volume: salesVolume,
             timeframe: `${timeframeDays}d`,
             priceRange: `€${salesMin.toFixed(2)}-€${salesMax.toFixed(2)}`,
-            avgPrice: `€${salesAvg.toFixed(2)}`,
+            medianPrice: `€${salesMedian.toFixed(2)}`, // Primary reference
+            avgPrice: `€${salesAvg.toFixed(2)}`,       // Secondary reference
             recommendedPrice: `€${recommendedPrice.toFixed(2)}`
         }
     };
@@ -1075,13 +1125,28 @@ app.post('/analyze-prices', async (req, res) => {
             const priceData = multiTimeframeAnalysis.bestTimeframe.data;
             const timeframePeriod = multiTimeframeAnalysis.bestTimeframe.period;
             
+            // SALES VELOCITY ANALYSIS - Game changer for sellability prediction
+            const salesVelocity = priceData.volume / (currentQuantity * 7); // Sales per listing per day
+            const velocityCategory = salesVelocity >= 0.1 ? 'EXCELLENT' : 
+                                   salesVelocity >= 0.05 ? 'GOOD' : 
+                                   salesVelocity >= 0.03 ? 'MODERATE' : 
+                                   salesVelocity >= 0.01 ? 'LOW' : 'VERY_LOW';
+            
+            console.log(`[Sales Velocity] ${itemName}: ${salesVelocity.toFixed(3)} velocity (${priceData.volume} sales / ${currentQuantity} listings / 7 days) = ${velocityCategory}`);
+            
+            // VELOCITY FILTER - Skip items with poor velocity (oversaturated markets)
+            if (salesVelocity < 0.01) {
+                console.log(`[Velocity Filter] ${itemName}: Velocity ${salesVelocity.toFixed(3)} too low - oversaturated market with ${currentQuantity} listings`);
+                continue;
+            }
+            
             console.log(`[Multi-Timeframe] ${itemName}: Using ${timeframePeriod} data (${priceData.volume} sales, trend: ${multiTimeframeAnalysis.trend})`);
             
             // SMART ACHIEVABLE PRICE: Use actual sales data for realistic pricing
             const skinportBuyPrice = typeof itemPrice === 'number' ? itemPrice : parseFloat(itemPrice.toString().replace(',', '.'));
             
             // Float Value Intelligence Analysis with market context
-            const floatAnalysis = analyzeFloatValue(itemName, skinportBuyPrice, itemData);
+            const floatAnalysis = analyzeFloatValue(itemName, skinportBuyPrice, marketData);
             console.log(`[Enhanced Float Intelligence] ${itemName}: ${floatAnalysis.floatAnalysis}`);
             
             // Apply float-adjusted expectations to minimum price
@@ -1139,13 +1204,18 @@ app.post('/analyze-prices', async (req, res) => {
             }
             
             // Market analysis
+            const salesAvgPrice = priceData.avg;           // For compatibility 
+            const salesMinPrice = priceData.min;           // For compatibility
+            const salesMaxPrice = priceData.max;           // For compatibility
+            const salesVolume = priceData.volume;          // For compatibility
             const pricePosition = (achievableGrossPrice - salesMinPrice) / (salesMaxPrice - salesMinPrice);
             const marketSpread = currentMaxPrice - currentMinPrice;
+            const marketVolatility = marketSpread > 0 ? (marketSpread / currentMeanPrice) * 100 : 0;
             
             // Calculate pricing accuracy - how likely our recommended price is to sell
             const pricingAccuracy = calculatePricingAccuracy(achievableGrossPrice, salesData, 7);
             
-            // Single unified confidence system combining volume + accuracy
+            // Enhanced unified confidence system: Volume + Accuracy + Velocity
             const volumeScore = priceData.volume >= 8 ? 4 : 
                                priceData.volume >= 4 ? 3 : 
                                priceData.volume >= 2 ? 2 : 1;
@@ -1154,8 +1224,14 @@ app.post('/analyze-prices', async (req, res) => {
                                  pricingAccuracy.accuracy >= 60 ? 3 : 
                                  pricingAccuracy.accuracy >= 40 ? 2 : 1;
             
-            // Combined confidence scoring
-            const combinedScore = (volumeScore + accuracyScore) / 2;
+            // NEW: Velocity score based on sales per listing per day
+            const velocityScore = salesVelocity >= 0.1 ? 4 :    // Excellent velocity 
+                                 salesVelocity >= 0.05 ? 3 :   // Good velocity
+                                 salesVelocity >= 0.03 ? 2 :   // Moderate velocity  
+                                 salesVelocity >= 0.01 ? 1 : 0; // Low velocity (filtered out above)
+            
+            // Enhanced combined confidence scoring (3 factors instead of 2)
+            const combinedScore = (volumeScore + accuracyScore + velocityScore) / 3;
             
             let confidenceLevel, confidenceScore, colorCode, description;
             
@@ -1187,43 +1263,58 @@ app.post('/analyze-prices', async (req, res) => {
                 factors: [
                     `Volume: ${priceData.volume} sales (${volumeScore}/4)`,
                     `Accuracy: ${pricingAccuracy.accuracy}% (${accuracyScore}/4)`,
+                    `Velocity: ${salesVelocity.toFixed(3)} (${velocityScore}/4)`,
                     `Combined: ${combinedScore.toFixed(1)}/4`
                 ],
                 colorCode: colorCode,
                 description: description,
                 volumeScore: volumeScore,
                 accuracyScore: accuracyScore,
+                velocityScore: velocityScore,
                 combinedScore: combinedScore
             };
             
-            // Liquidity-focused color override for final display
+            // Enhanced Liquidity-focused color override with VELOCITY integration
             let finalColorCode = colorCode;
             
-            // RED: Low liquidity (risky/slow) - regardless of profit
-            if (priceData.volume < 3 || pricingAccuracy.accuracy < 60) {
+            // RED: Low liquidity OR low velocity (risky/slow) - regardless of profit
+            if (priceData.volume < 3 || pricingAccuracy.accuracy < 60 || salesVelocity < 0.02) {
                 finalColorCode = 'RED';
-                overallConfidence.description = 'Low liquidity - risky/slow to sell';
+                overallConfidence.description = `Low liquidity/velocity - risky/slow to sell (velocity: ${salesVelocity.toFixed(3)})`;
             }
             // ORANGE: Medium liquidity with decent profit
-            else if ((priceData.volume >= 3 && priceData.volume < 8) || (pricingAccuracy.accuracy >= 60 && pricingAccuracy.accuracy < 80)) {
+            else if ((priceData.volume >= 3 && priceData.volume < 8) || 
+                    (pricingAccuracy.accuracy >= 60 && pricingAccuracy.accuracy < 80) ||
+                    (salesVelocity >= 0.02 && salesVelocity < 0.05)) {
                 finalColorCode = 'ORANGE';
-                overallConfidence.description = 'Medium liquidity - moderate risk';
+                overallConfidence.description = `Medium liquidity/velocity - moderate risk (velocity: ${salesVelocity.toFixed(3)})`;
             }
-            // GREEN: High liquidity and profitable
-            else if (priceData.volume >= 8 && pricingAccuracy.accuracy >= 80) {
+            // GREEN: High liquidity, good accuracy AND good velocity
+            else if (priceData.volume >= 8 && pricingAccuracy.accuracy >= 80 && salesVelocity >= 0.05) {
                 finalColorCode = 'GREEN';
-                overallConfidence.description = 'High liquidity - likely quick sale';
+                overallConfidence.description = `High liquidity/velocity - likely quick sale (velocity: ${salesVelocity.toFixed(3)})`;
             }
             // Fallback to ORANGE for edge cases
             else {
                 finalColorCode = 'ORANGE';
-                overallConfidence.description = 'Moderate conditions';
+                overallConfidence.description = `Moderate conditions (velocity: ${salesVelocity.toFixed(3)})`;
             }
             
             overallConfidence.finalColorCode = finalColorCode;
             
-            // Use simple time estimate
-            let enhancedTimeEstimate = timeEstimate;
+            // Enhanced time estimate based on velocity
+            let enhancedTimeEstimate;
+            if (salesVelocity >= 0.1) {
+                enhancedTimeEstimate = '1-2 days (Excellent velocity)';
+            } else if (salesVelocity >= 0.05) {
+                enhancedTimeEstimate = '2-5 days (Good velocity)';
+            } else if (salesVelocity >= 0.03) {
+                enhancedTimeEstimate = '1-2 weeks (Moderate velocity)';
+            } else if (salesVelocity >= 0.01) {
+                enhancedTimeEstimate = '2-4 weeks (Low velocity)';
+            } else {
+                enhancedTimeEstimate = '1+ months (Very low velocity)';
+            }
             
             // Create analyzed item with smart pricing
             analyzedItems.push({
@@ -1269,7 +1360,14 @@ app.post('/analyze-prices', async (req, res) => {
                 confidenceDescription: overallConfidence.description,
                 volumeScore: overallConfidence.volumeScore,
                 accuracyScore: overallConfidence.accuracyScore,
+                velocityScore: overallConfidence.velocityScore,
                 combinedScore: overallConfidence.combinedScore,
+                
+                // Sales velocity analysis
+                salesVelocity: salesVelocity.toFixed(4),
+                velocityCategory: velocityCategory,
+                listingCompetition: currentQuantity,
+                
                 timeEstimate: enhancedTimeEstimate,
                 pricingStrategy: smartPricing.strategy,
                 pricingReasoning: smartPricing.reasoning,
@@ -1289,10 +1387,12 @@ app.post('/analyze-prices', async (req, res) => {
                 recentMarketData: {
                     dataQuality: multiTimeframeAnalysis.recentDataQuality,
                     timeframe: timeframePeriod,
-                    recentAvg: recentAvg.toFixed(2),
-                    vs24h: recent24hData ? `€${recent24hData.avg.toFixed(2)} (${recent24hData.volume} sales)` : 'No data',
-                    vs7d: recent7dData ? `€${recent7dData.avg.toFixed(2)} (${recent7dData.volume} sales)` : 'No data',
-                    priceSpread: overallConfidence.marketMetrics.priceSpread + '%'
+                    recentMedian: (salesMedian).toFixed(2),
+                    vs24h: multiTimeframeAnalysis.allTimeframes.find(t => t.period === '24h') ? 
+                           `€${(multiTimeframeAnalysis.allTimeframes.find(t => t.period === '24h').data.median || multiTimeframeAnalysis.allTimeframes.find(t => t.period === '24h').data.avg).toFixed(2)} (${multiTimeframeAnalysis.allTimeframes.find(t => t.period === '24h').data.volume} sales)` : 'No data',
+                    vs7d: multiTimeframeAnalysis.allTimeframes.find(t => t.period === '7d') ? 
+                          `€${(multiTimeframeAnalysis.allTimeframes.find(t => t.period === '7d').data.median || multiTimeframeAnalysis.allTimeframes.find(t => t.period === '7d').data.avg).toFixed(2)} (${multiTimeframeAnalysis.allTimeframes.find(t => t.period === '7d').data.volume} sales)` : 'No data',
+                    velocityRating: velocityCategory
                 },
                 
                 // Simplified market metrics
