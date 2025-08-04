@@ -589,7 +589,7 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
     }
     
     // REALITY CHECK: Don't exceed sales median by too much
-    if (recentSalesMedian && basePrice > recentSalesMedian * 1.10) {
+    if (recentSalesMedian && basePrice > recentSalesMedian * 1.05) {
         basePrice = recentSalesMedian * 1.05;
         reasoning += `, capped at 105% of sales median (€${recentSalesMedian.toFixed(2)})`;
     }
@@ -666,9 +666,9 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
     }
     
     // DOUBLE CHECK: Ensure we don't exceed recent sales median by too much
-    if (basePrice > recentSalesMedian * 1.15) {
-        basePrice = recentSalesMedian * 1.15;
-        reasoning += ', capped at 115% of recent sales median';
+    if (recentSalesMedian && basePrice > recentSalesMedian * 1.05) {
+        basePrice = recentSalesMedian * 1.05;
+        reasoning += ', capped at 105% of recent sales median';
     }
     
     // Final profit verification
