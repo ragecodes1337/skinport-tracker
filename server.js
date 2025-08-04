@@ -396,16 +396,67 @@ function analyzeMultiTimeframe(salesData) {
 }
 
 /**
- * PROFITABILITY-FIRST Smart pricing calculation - ensures profit before market positioning
+ * CHEAPEST TRADEABLE Gap Analysis - Analyze the gap between buy price and cheapest tradeable
+ */
+function analyzeCheapestTradeableGap(buyPrice, cheapestTradeable) {
+    const gap = cheapestTradeable - buyPrice;
+    const gapPercentage = (gap / buyPrice) * 100;
+    
+    let gapCategory, strategy, description;
+    
+    if (gapPercentage >= 50) {
+        gapCategory = 'HUGE_GAP';
+        strategy = 'AGGRESSIVE_UNDERCUT';
+        description = `Huge ${gapPercentage.toFixed(1)}% gap - can undercut aggressively`;
+    } else if (gapPercentage >= 25) {
+        gapCategory = 'LARGE_GAP';
+        strategy = 'MODERATE_UNDERCUT';
+        description = `Large ${gapPercentage.toFixed(1)}% gap - moderate undercut recommended`;
+    } else if (gapPercentage >= 10) {
+        gapCategory = 'MEDIUM_GAP';
+        strategy = 'SMALL_UNDERCUT';
+        description = `Medium ${gapPercentage.toFixed(1)}% gap - small undercut or competitive pricing`;
+    } else if (gapPercentage >= 3) {
+        gapCategory = 'SMALL_GAP';
+        strategy = 'MINIMAL_UNDERCUT';
+        description = `Small ${gapPercentage.toFixed(1)}% gap - minimal undercut, rely on market position`;
+    } else {
+        gapCategory = 'TINY_GAP';
+        strategy = 'MATCH_OR_SLIGHT_UNDER';
+        description = `Tiny ${gapPercentage.toFixed(1)}% gap - match cheapest or slight undercut`;
+    }
+    
+    return {
+        gap: gap,
+        gapPercentage: gapPercentage,
+        gapCategory: gapCategory,
+        strategy: strategy,
+        description: description
+    };
+}
+
+/**
+ * SALES-ONLY Smart pricing calculation with CHEAPEST TRADEABLE integration
  */
 function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData, currentMinPrice, floatAnalysis = null) {
     if (!multiTimeframeData || !multiTimeframeData.bestTimeframe) {
-        // Fallback to simple competitive pricing
+        // Fallback to conservative sales-based pricing
+        const recent7dData = multiTimeframeData?.allTimeframes?.find(t => t.period === '7d');
+        if (recent7dData) {
+            const conservativePrice = (recent7dData.data.median || recent7dData.data.avg) * 0.90;
+            return {
+                achievablePrice: conservativePrice,
+                confidence: 'LOW',
+                strategy: 'FALLBACK_SALES_CONSERVATIVE',
+                reasoning: 'Limited sales data, using conservative 7d median * 0.90'
+            };
+        }
+        
         return {
-            achievablePrice: currentMinPrice * 0.95,
-            confidence: 'LOW',
-            strategy: 'FALLBACK_COMPETITIVE',
-            reasoning: 'Limited sales data, using competitive pricing'
+            achievablePrice: 0,
+            confidence: 'REJECTED',
+            strategy: 'NO_SALES_DATA',
+            reasoning: 'No sales data available for pricing'
         };
     }
     
@@ -418,6 +469,12 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
     const salesMin = salesData.min;
     const salesMax = salesData.max;
     const salesVolume = salesData.volume;
+    
+    // CHEAPEST TRADEABLE ANALYSIS - Core feature integration
+    const cheapestTradeable = currentMinPrice;
+    const gapAnalysis = analyzeCheapestTradeableGap(buyPrice, cheapestTradeable);
+    
+    console.log(`[CHEAPEST TRADEABLE] Buy: €${buyPrice.toFixed(2)} vs Cheapest: €${cheapestTradeable.toFixed(2)} = ${gapAnalysis.description}`);
     
     // CRITICAL: Check against RECENT sales medians (24h/7d priority) for better outlier resistance
     const recentDataQuality = multiTimeframeData.recentDataQuality;
@@ -469,40 +526,92 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
     // Calculate MINIMUM profitable price (what we MUST get to make profit)
     const minProfitablePrice = buyPrice * (1 + minProfitMargin) / (1 - SKINPORT_FEE);
     
-    console.log(`[Median-Based Pricing] €${buyPrice.toFixed(2)} item: Need €${minProfitablePrice.toFixed(2)} minimum (${(minProfitMargin*100).toFixed(1)}% margin) [${weeklyVolume} sales/week]`);
+    console.log(`[SALES-ONLY Pricing] €${buyPrice.toFixed(2)} item: Need €${minProfitablePrice.toFixed(2)} minimum (${(minProfitMargin*100).toFixed(1)}% margin) [${weeklyVolume} sales/week]`);
     
-    // STEP 2: Use recent market data for pricing - MEDIAN-BASED for outlier resistance
-    let recentMarketMedian = recent24hMedian || recent7dMedian || salesMedian;
+    // STEP 2: SALES-ONLY PRICING - Use ONLY actual sales data for pricing
+    let recentSalesMedian = recent24hMedian || recent7dMedian || salesMedian;
     let selectedPeriod = recent24hMedian ? '24h' : recent7dMedian ? '7d' : bestPeriod;
     
-    // Simple market tolerance - allow small premium above recent median (more stable)
-    const marketTolerance = recentMarketMedian * 1.05; // 5% above recent median max
-    
-    // Simple profitability check
-    if (minProfitablePrice > marketTolerance) {
-        console.log(`[Profitability Check] Minimum profit €${minProfitablePrice.toFixed(2)} exceeds market tolerance €${marketTolerance.toFixed(2)} - not viable`);
+    // REALITY CHECK: If minimum profit exceeds recent sales median, reject item
+    if (minProfitablePrice > recentSalesMedian * 1.10) {
+        console.log(`[Sales Reality Check] Minimum profit €${minProfitablePrice.toFixed(2)} exceeds recent sales median €${recentSalesMedian.toFixed(2)} by ${(((minProfitablePrice/recentSalesMedian) - 1) * 100).toFixed(1)}% - REJECTED`);
         return {
             achievablePrice: 0,
             confidence: 'REJECTED',
-            strategy: 'NOT_PROFITABLE',
-            reasoning: `Minimum ${(minProfitMargin*100).toFixed(1)}% margin not achievable at market prices`
+            strategy: 'SALES_REALITY_REJECTION',
+            reasoning: `Minimum ${(minProfitMargin*100).toFixed(1)}% margin requires price above recent sales median`
         };
     }
     
-    // Simple pricing strategy - competitive pricing with profit protection (MEDIAN-BASED)
-    const listingVsRecentRatio = currentMinPrice_val / recentMarketMedian;
+    // SALES-ONLY pricing strategy with CHEAPEST TRADEABLE integration
     let basePrice;
-    let strategy = 'MEDIAN_COMPETITIVE_PRICING';
+    let strategy = 'SALES_CHEAPEST_TRADEABLE_HYBRID';
     let reasoning;
     
-    if (listingVsRecentRatio > 1.05) {
-        // Current listings above recent sales median - price based on recent median sales
-        basePrice = Math.max(recentMarketMedian * 0.95, minProfitablePrice);
-        reasoning = `Competitive vs overpriced listings using median (min profit: €${minProfitablePrice.toFixed(2)})`;
+    // CHEAPEST TRADEABLE Strategy based on gap analysis
+    if (gapAnalysis.gapCategory === 'HUGE_GAP') {
+        // Huge gap: Aggressive undercut (10-15% below cheapest tradeable)
+        const undercut = cheapestTradeable * 0.85; // 15% undercut
+        basePrice = Math.max(undercut, minProfitablePrice);
+        strategy = 'CHEAPEST_TRADEABLE_AGGRESSIVE';
+        reasoning = `Huge gap pricing: 15% under cheapest tradeable (€${cheapestTradeable.toFixed(2)})`;
+        
+    } else if (gapAnalysis.gapCategory === 'LARGE_GAP') {
+        // Large gap: Moderate undercut (5-8% below cheapest tradeable)
+        const undercut = cheapestTradeable * 0.92; // 8% undercut
+        basePrice = Math.max(undercut, minProfitablePrice);
+        strategy = 'CHEAPEST_TRADEABLE_MODERATE';
+        reasoning = `Large gap pricing: 8% under cheapest tradeable (€${cheapestTradeable.toFixed(2)})`;
+        
+    } else if (gapAnalysis.gapCategory === 'MEDIUM_GAP') {
+        // Medium gap: Small undercut or sales-based pricing
+        const undercut = cheapestTradeable * 0.95; // 5% undercut
+        const salesBased = recentSalesMedian ? recentSalesMedian * 0.95 : salesMedian * 0.95;
+        basePrice = Math.max(Math.min(undercut, salesBased), minProfitablePrice);
+        strategy = 'CHEAPEST_TRADEABLE_SMALL';
+        reasoning = `Medium gap pricing: 5% under cheapest tradeable or sales median`;
+        
+    } else if (gapAnalysis.gapCategory === 'SMALL_GAP') {
+        // Small gap: Minimal undercut, focus on sales data
+        const undercut = cheapestTradeable * 0.97; // 3% undercut
+        const salesBased = recentSalesMedian ? recentSalesMedian * 0.97 : salesMedian * 0.97;
+        basePrice = Math.max(Math.min(undercut, salesBased), minProfitablePrice);
+        strategy = 'CHEAPEST_TRADEABLE_MINIMAL';
+        reasoning = `Small gap pricing: 3% under cheapest tradeable or sales data`;
+        
     } else {
-        // Price competitively but ensure profit
-        basePrice = Math.max(currentMinPrice_val * 0.95, minProfitablePrice);
-        reasoning = `Competitive pricing with profit protection (min: €${minProfitablePrice.toFixed(2)})`;
+        // Tiny gap: Match cheapest or slight undercut
+        const undercut = cheapestTradeable * 0.99; // 1% undercut
+        const salesBased = recentSalesMedian ? recentSalesMedian : salesMedian;
+        basePrice = Math.max(Math.min(undercut, salesBased), minProfitablePrice);
+        strategy = 'CHEAPEST_TRADEABLE_MATCH';
+        reasoning = `Tiny gap pricing: match or 1% under cheapest tradeable`;
+    }
+    
+    // REALITY CHECK: Don't exceed sales median by too much
+    if (recentSalesMedian && basePrice > recentSalesMedian * 1.10) {
+        basePrice = recentSalesMedian * 1.05;
+        reasoning += `, capped at 105% of sales median (€${recentSalesMedian.toFixed(2)})`;
+    }
+    if (recentSalesMedian && salesMin && salesMax) {
+        // Position ourselves in the sales range based on market conditions
+        const salesRange = salesMax - salesMin;
+        
+        if (salesRange < recentSalesMedian * 0.1) {
+            // Tight sales range - price at median
+            basePrice = Math.max(recentSalesMedian, minProfitablePrice);
+            reasoning = `Tight sales range - pricing at median €${recentSalesMedian.toFixed(2)}`;
+        } else {
+            // Normal sales range - price in bottom 30% for quick sale
+            const targetPercentile = 0.30; // Bottom 30% of sales range
+            const targetPrice = salesMin + (salesRange * targetPercentile);
+            basePrice = Math.max(targetPrice, minProfitablePrice);
+            reasoning = `Sales-only pricing at ${(targetPercentile * 100).toFixed(0)}th percentile: €${targetPrice.toFixed(2)} (min profit: €${minProfitablePrice.toFixed(2)})`;
+        }
+    } else {
+        // Fallback to conservative median pricing
+        basePrice = Math.max(recentSalesMedian * 0.95, minProfitablePrice);
+        reasoning = `Conservative sales median pricing (min profit: €${minProfitablePrice.toFixed(2)})`;
     }
     
     // Apply float adjustment if available
@@ -513,13 +622,13 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
         console.log(`[Float Pricing] Applied ${floatAnalysis.floatTier} multiplier: €${preFloatPrice.toFixed(2)} → €${basePrice.toFixed(2)}`);
     }
     
-    // Simple trend adjustment
+    // Simple trend adjustment based on sales data
     if (trend === 'RISING') {
-        basePrice *= 1.03; // Small premium for rising markets
-        reasoning += ', +3% for rising trend';
+        basePrice *= 1.02; // Small premium for rising markets
+        reasoning += ', +2% for rising sales trend';
     } else if (trend === 'FALLING') {
-        basePrice *= 0.97; // Small discount for falling markets  
-        reasoning += ', -3% for falling trend';
+        basePrice *= 0.98; // Small discount for falling markets  
+        reasoning += ', -2% for falling sales trend';
     }
     
     // VELOCITY-BASED PRICING ADJUSTMENT - Key enhancement from enhanced algorithm
@@ -550,16 +659,16 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
         confidence = 'VERY_LOW';
     }
     
-    // Cap at market tolerance
-    if (basePrice > marketTolerance) {
-        basePrice = marketTolerance;
-        reasoning += ', capped at market tolerance';
+    // CRITICAL: Cap at recent sales maximum (don't exceed what has actually sold)
+    if (basePrice > salesMax) {
+        basePrice = salesMax * 0.98; // 2% below highest sale
+        reasoning += ', capped at 98% of sales maximum';
     }
     
-    // Cap at sales maximum
-    if (basePrice > salesMax) {
-        basePrice = salesMax * 0.95;
-        reasoning += ', capped below market maximum';
+    // DOUBLE CHECK: Ensure we don't exceed recent sales median by too much
+    if (basePrice > recentSalesMedian * 1.15) {
+        basePrice = recentSalesMedian * 1.15;
+        reasoning += ', capped at 115% of recent sales median';
     }
     
     // Final profit verification
@@ -567,7 +676,7 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
     const finalProfit = finalNetPrice - buyPrice;
     const finalMargin = (finalProfit / buyPrice) * 100;
     
-    console.log(`[Median-Based Final Pricing] €${basePrice.toFixed(2)} gross → €${finalNetPrice.toFixed(2)} net = €${finalProfit.toFixed(2)} profit (${finalMargin.toFixed(1)}%)`);
+    console.log(`[SALES-ONLY Final Pricing] €${basePrice.toFixed(2)} gross → €${finalNetPrice.toFixed(2)} net = €${finalProfit.toFixed(2)} profit (${finalMargin.toFixed(1)}%)`);
 
     return {
         achievablePrice: basePrice,
@@ -582,11 +691,21 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
             volume: salesVolume,
             weeklyVolume: weeklyVolume
         },
+        cheapestTradeableData: {
+            price: cheapestTradeable,
+            gap: gapAnalysis.gap,
+            gapPercentage: gapAnalysis.gapPercentage,
+            gapCategory: gapAnalysis.gapCategory,
+            strategy: gapAnalysis.strategy,
+            description: gapAnalysis.description
+        },
         marketContext: {
-            listingVsSalesRatio: listingVsRecentRatio.toFixed(2),
+            salesOnlyPricing: true,
+            cheapestTradeableIntegrated: true,
             trend,
             isStableItem: isStableItem,
             minProfitRequired: minProfitablePrice,
+            recentSalesMedian: recentSalesMedian,
             floatIntelligence: floatAnalysis ? {
                 hasFloat: floatAnalysis.hasFloat,
                 floatValue: floatAnalysis.floatValue,
@@ -1188,6 +1307,22 @@ app.post('/analyze-prices', async (req, res) => {
             console.log(`  Profit: €${profitAmount.toFixed(2)} (${profitPercentage.toFixed(1)}%)`);
             console.log(`  Confidence: ${smartPricing.confidence}`);
             
+            // CHEAPEST TRADEABLE Analysis logging
+            if (smartPricing.cheapestTradeableData) {
+                const ctData = smartPricing.cheapestTradeableData;
+                console.log(`[CHEAPEST TRADEABLE] Current cheapest: €${ctData.price.toFixed(2)}`);
+                console.log(`[CHEAPEST TRADEABLE] Gap: €${ctData.gap.toFixed(2)} (${ctData.gapPercentage.toFixed(1)}%) - ${ctData.description}`);
+                console.log(`[CHEAPEST TRADEABLE] Strategy: ${ctData.strategy}`);
+            }
+            // CRITICAL REALITY CHECK: Don't buy items above recent sales median
+            const recent7dData = multiTimeframeAnalysis.allTimeframes.find(t => t.period === '7d');
+            const recent7dMedian = recent7dData ? (recent7dData.data.median || recent7dData.data.avg) : null;
+            
+            if (recent7dMedian && skinportBuyPrice > recent7dMedian * 1.05) {
+                console.log(`[Sales Reality Filter] ${itemName}: Buy price €${skinportBuyPrice.toFixed(2)} exceeds 7-day sales median €${recent7dMedian.toFixed(2)} by ${(((skinportBuyPrice/recent7dMedian) - 1) * 100).toFixed(1)}% - UNREALISTIC`);
+                continue;
+            }
+            
             // Skip items with no profit potential (should be rare now due to market reality checks)
             if (profitAmount <= 0) {
                 console.log(`[Smart Pricing] ${itemName}: No profit potential - skipping`);
@@ -1342,6 +1477,16 @@ app.post('/analyze-prices', async (req, res) => {
                 grossAchievablePrice: achievableGrossPrice.toFixed(2), // What to list at before fees
                 profitAmount: profitAmount.toFixed(2),
                 profitPercentage: profitPercentage.toFixed(1),
+                
+                // CHEAPEST TRADEABLE Analysis
+                cheapestTradeableData: smartPricing.cheapestTradeableData ? {
+                    price: smartPricing.cheapestTradeableData.price.toFixed(2),
+                    gap: smartPricing.cheapestTradeableData.gap.toFixed(2),
+                    gapPercentage: smartPricing.cheapestTradeableData.gapPercentage.toFixed(1),
+                    gapCategory: smartPricing.cheapestTradeableData.gapCategory,
+                    strategy: smartPricing.cheapestTradeableData.strategy,
+                    description: smartPricing.cheapestTradeableData.description
+                } : null,
                 
                 // Float Value Intelligence
                 floatIntelligence: floatAnalysis.hasFloat ? {
