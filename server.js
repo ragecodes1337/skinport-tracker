@@ -523,7 +523,7 @@ function calculateSmartAchievablePrice(buyPrice, marketData, multiTimeframeData,
         minProfitMargin = 0.05; // 5% for expensive items
     }
     
-    // Calculate MINIMUM profitable price (what we MUST get to make profit)
+    // Calculate  Table price (what we MUST get to make profit)
     const minProfitablePrice = buyPrice * (1 + minProfitMargin) / (1 - SKINPORT_FEE);
     
     console.log(`[SALES-ONLY Pricing] €${buyPrice.toFixed(2)} item: Need €${minProfitablePrice.toFixed(2)} minimum (${(minProfitMargin*100).toFixed(1)}% margin) [${weeklyVolume} sales/week]`);
