@@ -18,7 +18,7 @@ const MINIMUM_PROFIT_THRESHOLD = 0.12; // Minimum €0.12 profit (optimized for 
 
 // Rate limiting configuration - Skinport allows 8 requests per 5 minutes
 const RATE_LIMIT_WINDOW = 5 * 60 * 1000; // 5 minutes in milliseconds
-const MAX_REQUESTS_PER_WINDOW = 7; // Use 7 to be safe (was 5, now closer to the 8 limit)
+const MAX_REQUESTS_PER_WINDOW = 8; // Use full allowance of 8 requests per 5 minutes
 const requestQueue = []; // Queue to store timestamps of requests
 
 // Middleware
@@ -1208,6 +1208,7 @@ app.post('/analyze-prices', async (req, res) => {
             const salesMinPrice = priceData.min;           // For compatibility
             const salesMaxPrice = priceData.max;           // For compatibility
             const salesVolume = priceData.volume;          // For compatibility
+            const salesMedian = priceData.median || priceData.avg; // Primary pricing reference
             const pricePosition = (achievableGrossPrice - salesMinPrice) / (salesMaxPrice - salesMinPrice);
             const marketSpread = currentMaxPrice - currentMinPrice;
             const marketVolatility = marketSpread > 0 ? (marketSpread / currentMeanPrice) * 100 : 0;
